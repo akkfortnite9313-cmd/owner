@@ -1,0 +1,11 @@
+# личные данные — не выкладывать
+config.yaml
+chrome-profile/
+state.json
+state.tmp
+logs/
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

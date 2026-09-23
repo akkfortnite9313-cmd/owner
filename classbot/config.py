@@ -1,0 +1,256 @@
+"""Загрузка config.yaml и расчёт ближайших пар по расписанию."""
+from __future__ import annotations
+
+import datetime as dt
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable
+
+import yaml
+
+
+class ConfigError(Exception):
+    pass
+
+
+_DAY_NAMES = {
+    0: ["пн", "пон", "понедельник", "mon", "monday"],
+    1: ["вт", "вто", "вторник", "tue", "tues", "tuesday"],
+    2: ["ср", "сре", "среда", "wed", "wednesday"],
+    3: ["чт", "чет", "четверг", "thu", "thurs", "thursday"],
+    4: ["пт", "пят", "пятница", "fri", "friday"],
+    5: ["сб", "суб", "суббота", "sat", "saturday"],
+    6: ["вс", "вос", "воскресенье", "sun", "sunday"],
+}
+DAY_ALIASES = {name: num for num, names in _DAY_NAMES.items() for name in names}
+DAY_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+_WEEK_ALIASES = {
+    "odd": "odd", "нечетная": "odd", "нечет": "odd", "нечетные": "odd",
+    "even": "even", "четная": "even", "чет": "even", "четные": "even",
+}
+
+
+@dataclass(frozen=True)
+class ClassEntry:
+    name: str
+    days: frozenset[int]  # 0 = понедельник
+    start: dt.time
+    end: dt.time
+    course: str | None = None
+    meet: str | None = None
+    week: str | None = None  # "odd" / "even" / None
+
+
+@dataclass
+class Settings:
+    join_before_min: float = 1
+    look_for_link_before_min: float = 15
+    baseline_before_min: float = 60
+    fallback_after_min: float = 3
+    admit_wait_min: float = 15
+    stay_after_end_min: float = 0
+    link_poll_sec: float = 30
+    mute_audio: bool = True
+    watch_captions: bool = True
+    browser: str = "auto"
+    browser_path: str | None = None
+    semester_start: dt.date | None = None
+
+
+@dataclass
+class TelegramSettings:
+    bot_token: str = ""
+    chat_id: str = ""
+    mention_keywords: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Config:
+    settings: Settings
+    telegram: TelegramSettings
+    classes: list[ClassEntry]
+    path: Path | None = None
+
+
+@dataclass(frozen=True)
+class Occurrence:
+    entry: ClassEntry
+    start: dt.datetime
+    end: dt.datetime
+
+    @property
+    def key(self) -> str:
+        return f"{self.entry.name}|{self.start.isoformat()}"
+
+    def describe(self) -> str:
+        return (f"«{self.entry.name}» {DAY_SHORT[self.start.weekday()]} "
+                f"{self.start:%d.%m} {self.start:%H:%M}–{self.end:%H:%M}")
+
+
+def _norm(text: str) -> str:
+    return str(text).strip().lower().replace("ё", "е")
+
+
+def parse_time(value, where: str) -> dt.time:
+    # YAML 1.1 читает 10:30 без кавычек как число 630 (10*60+30) — это и есть минуты от полуночи.
+    if isinstance(value, int) and not isinstance(value, bool):
+        minutes = value
+    else:
+        m = re.fullmatch(r"(\d{1,2})[:.](\d{2})", str(value).strip())
+        if not m or int(m.group(2)) >= 60:
+            raise ConfigError(f"{where}: не понимаю время {value!r}, нужно вида \"09:00\"")
+        minutes = int(m.group(1)) * 60 + int(m.group(2))
+    if not 0 <= minutes < 24 * 60:
+        raise ConfigError(f"{where}: неверное время {value!r}")
+    return dt.time(minutes // 60, minutes % 60)
+
+
+def parse_days(value, where: str) -> frozenset[int]:
+    if value is None:
+        raise ConfigError(f"{where}: не указаны дни (days: [пн, ср])")
+    items = value if isinstance(value, list) else re.split(r"[,\s]+", str(value))
+    days = set()
+    for item in items:
+        token = _norm(item)
+        if not token:
+            continue
+        if token not in DAY_ALIASES:
+            raise ConfigError(f"{where}: не понимаю день недели {item!r} (пишите пн, вт, ср, чт, пт, сб, вс)")
+        days.add(DAY_ALIASES[token])
+    if not days:
+        raise ConfigError(f"{where}: не указаны дни (days: [пн, ср])")
+    return frozenset(days)
+
+
+def parse_week(value, where: str) -> str | None:
+    if value in (None, "", "any", "все", "любая"):
+        return None
+    token = _norm(value)
+    if token not in _WEEK_ALIASES:
+        raise ConfigError(f"{where}: week может быть odd/even (нечётная/чётная), а не {value!r}")
+    return _WEEK_ALIASES[token]
+
+
+def parse_date(value, where: str) -> dt.date | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, dt.date):
+        return value
+    try:
+        return dt.date.fromisoformat(str(value).strip())
+    except ValueError:
+        raise ConfigError(f"{where}: дата должна быть вида 2026-09-01, а не {value!r}") from None
+
+
+def _parse_class(raw: dict, idx: int) -> ClassEntry:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"classes[{idx}]: ожидается описание пары (name, days, start, end, course)")
+    name = str(raw.get("name") or f"Пара {idx + 1}").strip()
+    where = f"пара «{name}»"
+    days = parse_days(raw.get("days", raw.get("day")), where)
+    start = parse_time(raw.get("start"), where + ", start")
+    end = parse_time(raw.get("end"), where + ", end")
+    if end <= start:
+        raise ConfigError(f"{where}: конец ({end:%H:%M}) должен быть позже начала ({start:%H:%M})")
+    course = (raw.get("course") or "").strip() or None
+    meet = (raw.get("meet") or "").strip() or None
+    if not course and not meet:
+        raise ConfigError(f"{where}: укажите course (ссылку на курс в Classroom) или meet (постоянную ссылку)")
+    if course and "classroom.google.com" not in course:
+        raise ConfigError(f"{where}: course должен быть ссылкой вида https://classroom.google.com/c/...")
+    if meet and "meet.google.com" not in meet:
+        raise ConfigError(f"{where}: meet должен быть ссылкой вида https://meet.google.com/abc-defg-hij")
+    return ClassEntry(name=name, days=days, start=start, end=end, course=course, meet=meet,
+                      week=parse_week(raw.get("week"), where))
+
+
+def parse_config(data: dict, path: Path | None = None) -> Config:
+    if not isinstance(data, dict):
+        raise ConfigError("config.yaml пустой или повреждён")
+
+    raw_settings = data.get("settings") or {}
+    settings = Settings()
+    for key, value in raw_settings.items():
+        if not hasattr(settings, key):
+            raise ConfigError(f"settings: неизвестный параметр {key!r}")
+        if key == "semester_start":
+            value = parse_date(value, "settings.semester_start")
+        elif isinstance(getattr(Settings, key, None), bool):
+            value = bool(value)
+        elif isinstance(getattr(Settings, key, None), (int, float)):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                raise ConfigError(f"settings.{key}: нужно число, а не {value!r}") from None
+        setattr(settings, key, value)
+
+    raw_tg = data.get("telegram") or {}
+    keywords = raw_tg.get("mention_keywords") or []
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    telegram = TelegramSettings(
+        bot_token=str(raw_tg.get("bot_token") or "").strip(),
+        chat_id=str(raw_tg.get("chat_id") or "").strip(),
+        mention_keywords=[str(k).strip() for k in keywords if str(k).strip()],
+    )
+
+    raw_classes = data.get("classes") or []
+    if not isinstance(raw_classes, list):
+        raise ConfigError("classes: ожидается список пар")
+    classes = [_parse_class(raw, i) for i, raw in enumerate(raw_classes)]
+    names = [c.name for c in classes]
+    dupes = {n for n in names if names.count(n) > 1}
+    if dupes:
+        raise ConfigError(f"названия пар должны различаться: {', '.join(sorted(dupes))}")
+    if any(c.week for c in classes) and not settings.semester_start:
+        raise ConfigError("для чётных/нечётных недель укажите settings.semester_start (первый день семестра)")
+
+    return Config(settings=settings, telegram=telegram, classes=classes, path=path)
+
+
+def load_config(path: Path) -> Config:
+    if not path.exists():
+        raise ConfigError(f"не найден {path.name} — скопируйте config.example.yaml в config.yaml и заполните")
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8-sig"))
+    except yaml.YAMLError as ex:
+        raise ConfigError(f"ошибка в {path.name}: {ex}") from None
+    return parse_config(data, path)
+
+
+def week_parity(day: dt.date, semester_start: dt.date) -> str:
+    first_monday = semester_start - dt.timedelta(days=semester_start.weekday())
+    week_no = (day - first_monday).days // 7 + 1
+    return "odd" if week_no % 2 else "even"
+
+
+def upcoming(classes: Iterable[ClassEntry], now: dt.datetime, settings: Settings,
+             days_ahead: int = 15) -> list[Occurrence]:
+    """Все пары, которые ещё не закончились, в порядке начала."""
+    result = []
+    classes = list(classes)
+    for offset in range(days_ahead):
+        day = now.date() + dt.timedelta(days=offset)
+        for c in classes:
+            if day.weekday() not in c.days:
+                continue
+            if c.week and week_parity(day, settings.semester_start) != c.week:
+                continue
+            start = dt.datetime.combine(day, c.start)
+            end = dt.datetime.combine(day, c.end)
+            # Заходить на пару, до конца которой меньше пары минут, смысла нет.
+            if end - dt.timedelta(minutes=2) <= now:
+                continue
+            result.append(Occurrence(c, start, end))
+    result.sort(key=lambda o: (o.start, o.entry.name))
+    return result
+
+
+def next_occurrence(classes: Iterable[ClassEntry], now: dt.datetime, settings: Settings,
+                    skip: set[str] = frozenset()) -> Occurrence | None:
+    for occ in upcoming(classes, now, settings):
+        if occ.key not in skip:
+            return occ
+    return None
