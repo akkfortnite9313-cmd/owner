@@ -317,3 +317,24 @@ def test_list_courses_from_classroom_home(page):
         {"name": "Английский", "url": "https://classroom.google.com/c/NDU2"},
         {"name": "Английский (2)", "url": "https://classroom.google.com/c/Nzg5"},
     ]
+
+
+def test_check_lists_concrete_problems(tmp_path, monkeypatch):
+    from classbot import tasks
+    from classbot.notify import Notifier
+
+    def fake_launch(pw, settings, profile_dir, executable=None):
+        browser = pw.chromium.launch()
+        ctx = browser.new_context()
+        install_routes(ctx, [A])
+        ctx.new_page()
+        orig_close = ctx.close
+        ctx.close = lambda: (orig_close(), browser.close())
+        return ctx
+
+    monkeypatch.setattr(tasks, "launch", fake_launch)
+    cfg = Config(settings=Settings(browser_path=os.__file__), telegram=TelegramSettings(), classes=[])
+    problems = tasks.check(cfg, runner.Paths(tmp_path), Notifier("", ""))
+    assert any("нет ни одной пары" in p for p in problems), problems
+    assert any("Telegram не подключён" in p for p in problems), problems
+    assert not any("не вошёл" in p for p in problems), problems

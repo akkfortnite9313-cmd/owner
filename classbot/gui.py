@@ -846,9 +846,9 @@ class App:
             return
         self.nb.select(self.tab_main)
         notifier = Notifier(cfg.telegram.bot_token, cfg.telegram.chat_id)
-        self.run_task("Проверка", lambda: tasks.check(cfg, self.paths, notifier), lambda ok: (
-            messagebox.showinfo("Проверка", "Всё в порядке.") if ok else
-            messagebox.showwarning("Проверка", "Есть проблемы — подробности в журнале на главной вкладке.")))
+        self.run_task("Проверка", lambda: tasks.check(cfg, self.paths, notifier), lambda problems: (
+            messagebox.showwarning("Проверка", "Что поправить:\n\n" + "\n\n".join(f"• {p}" for p in problems))
+            if problems else messagebox.showinfo("Проверка", "Всё в порядке.")))
 
     def test_join(self):
         cfg = self.save()

@@ -100,7 +100,7 @@ def cmd_telegram(cfg, paths: Paths, notifier: Notifier, args) -> int:
 
 
 def cmd_check(cfg, paths: Paths, notifier: Notifier, args) -> int:
-    return 0 if tasks.check(cfg, paths, notifier) else 1
+    return 1 if tasks.check(cfg, paths, notifier) else 0
 
 
 def cmd_join(cfg, paths: Paths, notifier: Notifier, args) -> int:

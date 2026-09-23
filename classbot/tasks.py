@@ -118,23 +118,31 @@ def login_in_bot_window(cfg: Config, paths: Paths) -> bool:
     return verify_login(cfg, paths)
 
 
-def check(cfg: Config, paths: Paths, notifier: Notifier) -> bool:
-    """Проверяет всё по очереди и пишет результат в журнал. True — всё хорошо."""
-    ok = True
+def check(cfg: Config, paths: Paths, notifier: Notifier) -> list[str]:
+    """Проверяет всё по очереди и пишет в журнал. Возвращает список проблем (пустой — всё хорошо)."""
+    problems: list[str] = []
+
+    def problem(text: str) -> None:
+        log.warning("%s", text)
+        problems.append(text)
+
     log.info("===== Проверка =====")
     log.info("Пар в расписании: %d", len(cfg.classes))
     for occ in upcoming(cfg.classes, dt.datetime.now(), cfg.settings)[:5]:
         log.info("  %s — %s", occ.describe(), describe_source(occ.entry))
     if not cfg.classes:
-        log.warning("Добавьте пары во вкладке «Расписание»")
-        ok = False
+        problem("В расписании нет ни одной пары — добавьте их во вкладке «Расписание»")
 
     if notifier.enabled:
         sent = notifier.send("🧪 Проверка: уведомления работают")
-        log.info("Telegram: %s", "тестовое сообщение отправлено" if sent else "НЕ удалось отправить")
-        ok &= sent
+        if sent:
+            log.info("Telegram: тестовое сообщение отправлено")
+        else:
+            problem("Telegram: не удалось отправить сообщение — проверьте токен и Chat ID во вкладке «Уведомления»")
+        if not cfg.telegram.mention_keywords:
+            problem("Не вписаны слова для уведомлений — впишите свою фамилию во вкладке «Уведомления»")
     else:
-        log.warning("Telegram не подключён — уведомлений не будет")
+        problem("Telegram не подключён — уведомлений не будет (вкладка «Уведомления»)")
 
     log.info("Браузер: %s", find_browser(cfg.settings))
     state = State(paths.state)
@@ -150,12 +158,11 @@ def check(cfg: Config, paths: Paths, notifier: Notifier) -> bool:
                 try:
                     order, counts = fetch_meet_links(page, course)
                 except NotLoggedIn:
-                    log.error("Вход в Google: НЕТ — нажмите «Войти в аккаунты»")
-                    return False
+                    problem("Бот не вошёл в Google — нажмите «Войти в аккаунты»")
+                    return problems
                 except Exception as ex:
-                    log.error("%s: не открылась лента курса (%s). Проверьте интернет и ссылку на курс.",
-                              names, str(ex).splitlines()[0])
-                    ok = False
+                    problem(f"{names}: не открылась лента курса ({str(ex).splitlines()[0]}). "
+                            "Проверьте интернет и курс в настройках пары")
                     continue
                 opened += 1
                 log.info("%s: ссылок на звонки в ленте — %d%s", names, len(order),
@@ -166,14 +173,19 @@ def check(cfg: Config, paths: Paths, notifier: Notifier) -> bool:
                 page.goto("https://classroom.google.com/", wait_until="domcontentloaded", timeout=60_000)
                 control.sleep(3)
                 if not is_logged_in(page):
-                    log.error("Вход в Google: НЕТ — нажмите «Войти в аккаунты»")
-                    return False
+                    problem("Бот не вошёл в Google — нажмите «Войти в аккаунты»")
+                    return problems
             if opened or not courses:
                 log.info("Вход в Google: есть")
         finally:
             ctx.close()
-    log.info("Проверка закончена: %s", "всё в порядке" if ok else "есть проблемы, см. выше")
-    return ok
+    if problems:
+        log.info("Проверка закончена. Что поправить:")
+        for text in problems:
+            log.info("  • %s", text)
+    else:
+        log.info("Проверка закончена: всё в порядке")
+    return problems
 
 
 def test_join(cfg: Config, paths: Paths, notifier: Notifier, url: str, minutes: float = 3) -> bool:
