@@ -45,6 +45,15 @@ def find_browser(settings: Settings) -> str:
                           "(https://www.google.com/chrome/) или укажите settings.browser_path")
 
 
+# Флаги, которые Playwright добавляет сам, но боту они мешают: с ними Google хуже пускает в аккаунт,
+# куки из обычного окна не читаются, а Chrome показывает жёлтую плашку «unsupported command-line flag».
+IGNORED_DEFAULT_ARGS = ["--enable-automation", "--use-mock-keychain", "--password-store=basic",
+                        "--enable-unsafe-swiftshader", "--unsafely-disable-devtools-self-xss-warnings"]
+# Флаги, из-за которых Chrome показывает предупреждение (проверяются в самопроверке сборки).
+WARNING_FLAGS = ["--no-sandbox", "--enable-unsafe-swiftshader", "--unsafely-disable-devtools-self-xss-warnings",
+                 "--disable-web-security", "--ignore-certificate-errors", "--single-process"]
+
+
 def _sandbox_supported() -> bool:
     # Playwright по умолчанию выключает «песочницу» Chrome (--no-sandbox), и Chrome пишет об этом
     # предупреждение. На обычном компьютере она работает; не работает только под root в Linux.
@@ -73,8 +82,7 @@ def launch(pw, settings: Settings, profile_dir: Path, executable: str | None = N
         executable_path=executable or find_browser(settings),
         headless=headless,
         args=args,
-        # Без этих флагов Google хуже пускает в аккаунт, а куки из обычного окна не читаются.
-        ignore_default_args=["--enable-automation", "--use-mock-keychain", "--password-store=basic"],
+        ignore_default_args=IGNORED_DEFAULT_ARGS,
         no_viewport=True,
         chromium_sandbox=_sandbox_supported(),
     )

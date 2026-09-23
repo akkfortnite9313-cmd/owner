@@ -118,7 +118,7 @@ def cmd_selftest(args) -> int:
 
         import tempfile
 
-        from classbot.browser import launch
+        from classbot.browser import WARNING_FLAGS, launch
 
         settings = Settings(browser_path=args.browser)
         exe = find_browser(settings)
@@ -131,8 +131,11 @@ def cmd_selftest(args) -> int:
             page.goto("chrome://version")
             command_line = page.inner_text("#command_line")
             ctx.close()
-        if "--no-sandbox" in command_line and sys.platform == "win32":
-            raise RuntimeError("Chrome запущен с --no-sandbox")
+        if sys.platform == "win32":
+            bad = [flag for flag in WARNING_FLAGS if flag in command_line.split()]
+            if bad:
+                raise RuntimeError(f"Chrome запущен с флагами, из-за которых показывает предупреждение: {bad}\n"
+                                   f"{command_line}")
         # Окно программы: tkinter, тема и иконка должны были попасть в сборку.
         import tkinter as tk
         from tkinter import ttk
