@@ -212,3 +212,18 @@ def test_found_calls_are_listed_on_main_tab(app):
     app.refresh_upcoming()
     rows = [app.upcoming_tree.item(i)["values"] for i in app.upcoming_tree.get_children()]
     assert rows and rows[0][1] == "Лекція №10" and rows[0][2] == "найдено в ленте (Zoom)", rows
+
+
+def test_empty_upcoming_shows_last_found_call(app):
+    from classbot.autofind import AutoCalls
+    from classbot.state import State
+    course = "https://classroom.google.com/c/abc"
+    AutoCalls(State(app.paths.state)).update(
+        course, [("https://us04web.zoom.us/j/3637539970?pwd=X", "Тема: Лекція №09\nЧас: 23 вересня 2026 9:00 AM Київ")],
+        dt.datetime(2026, 9, 23, 21, 0), dt.timedelta(minutes=80), (dt.time(7), dt.time(21)))
+    app.cfg.classes.clear()
+    app.cfg.settings.auto_enabled = True
+    app.cfg.settings.auto_courses = [course]
+    app.refresh_upcoming()
+    rows = [app.upcoming_tree.item(i)["values"] for i in app.upcoming_tree.get_children()]
+    assert rows == [["—", "Новых звонков в ленте пока нет", "последний найденный: Лекція №09 — 23.09 09:00"]], rows

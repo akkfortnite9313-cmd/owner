@@ -731,6 +731,16 @@ class App:
         for occ, source in items[:6]:
             when = f"{DAY_NAMES[occ.start.weekday()]} {occ.start:%d.%m}  {occ.start:%H:%M}–{occ.end:%H:%M}"
             self.upcoming_tree.insert("", "end", values=(when, occ.entry.name, source))
+        if not items and s.auto_enabled and s.auto_courses:
+            # Показать, что бот следит за лентой, даже когда впереди ничего нет.
+            try:
+                calls = State(self.paths.state).data.get("auto", {}).get("calls", {}).values()
+                last = max(calls, key=lambda rec: rec["start"], default=None)
+            except Exception:
+                last = None
+            note = (f"последний найденный: {last['title']} — {dt.datetime.fromisoformat(last['start']):%d.%m %H:%M}"
+                    if last else "бот смотрит ленту каждые 5 минут, пока бот запущен")
+            self.upcoming_tree.insert("", "end", values=("—", "Новых звонков в ленте пока нет", note))
 
     # --- автоматический режим ---
 

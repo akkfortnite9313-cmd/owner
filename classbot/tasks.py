@@ -217,7 +217,8 @@ def _report_posts(course: str, posts: list[tuple[str, str]], paths: Paths) -> No
         info = parse_post(text, link, now.date())
         when, time_only = info.when, info.time_only
         if when:
-            note = f"{when:%d.%m.%Y %H:%M}" + (" (уже прошло)" if when < now - dt.timedelta(hours=2) else "")
+            note = f"{when:%d.%m.%Y %H:%M}" + (f"–{info.end_time:%H:%M}" if info.end_time else "")
+            note += " (уже прошло)" if when < now - dt.timedelta(hours=2) else ""
         elif time_only:
             note = f"время {time_only:%H:%M} без даты"
         else:
@@ -349,6 +350,8 @@ def diagnose_feed(cfg: Config, paths: Paths) -> str:
                     info = parse_post(text, normalize_link(href) or href, now.date())
                     when, time_only = info.when, info.time_only
                     understood = when and f"{when:%d.%m.%Y %H:%M}" or time_only and f"время {time_only:%H:%M}" or "нет"
+                    if info.end_time:
+                        understood += f"–{info.end_time:%H:%M}"
                     understood += f" | тема: {info.title} | код: {info.passcode or '-'}"
                     compact = " / ".join(line.strip() for line in text.replace(LINK_MARK, " ⟦ССЫЛКА⟧ ").splitlines()
                                          if line.strip())

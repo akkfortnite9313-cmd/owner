@@ -13,15 +13,6 @@ log = logging.getLogger(__name__)
 CLASSROOM_HOST = "classroom.google.com"
 
 
-def _collect(page) -> list[str]:
-    hrefs = page.evaluate("() => Array.from(document.querySelectorAll('a[href]'), a => a.href)")
-    urls = [h for h in hrefs if "meet.google.com" in h or "zoom.us" in h or "google.com/url" in h]
-    if not count_links(urls)[0]:
-        # Если ссылка вставлена просто текстом и не превратилась в <a>.
-        urls = links_from_text(page.evaluate("() => document.body ? document.body.innerText : ''"))
-    return urls
-
-
 
 # Ссылки на курсы на главной странице Classroom (карточки курсов и боковое меню).
 _COURSES_JS = r"""() => {
@@ -104,14 +95,27 @@ POSTS_JS = r"""() => {
     for (const x of el.querySelectorAll('a[href]')) { const k = keyOf(x.href); if (k) s.add(k); }
     return s;
   };
+  // У каждого поста ленты Classroom есть атрибут data-stream-item-id — берём текст ровно этого поста.
+  // Кнопка Meet в шапке курса, боковое меню и выпадающие меню к постам не относятся.
+  const hasItems = document.querySelector('[data-stream-item-id]') !== null;
+  const notPost = 'nav, aside, header, [role=menu], [role=navigation], [role=complementary], [role=banner], [role=dialog]';
   const out = [];
   for (const a of document.querySelectorAll('a[href]')) {
     if (!keyOf(a.href)) continue;
-    let node = a;
-    for (let i = 0; i < 15 && node.parentElement; i++) {
-      const p = node.parentElement;
-      if ((p.innerText || '').length > 4000 || keysIn(p).size > 1) break;
-      node = p;
+    let node;
+    if (hasItems) {
+      node = a.closest('[data-stream-item-id]');
+      if (!node) continue;
+    } else {
+      // Запасной вариант, если Google поменяет разметку: поднимаемся от ссылки, пока не
+      // упрёмся в соседний пост с другой ссылкой на звонок или в слишком большой блок.
+      if (a.closest(notPost)) continue;
+      node = a;
+      for (let i = 0; i < 15 && node.parentElement; i++) {
+        const p = node.parentElement;
+        if ((p.innerText || '').length > 4000 || keysIn(p).size > 1) break;
+        node = p;
+      }
     }
     // Помечаем место ссылки в тексте поста, чтобы время искать рядом с ней, а не в соседних постах.
     const mark = document.createElement('span');
@@ -144,18 +148,13 @@ def is_logged_in(page) -> bool:
 
 
 def fetch_meet_links(page, course_url: str) -> tuple[list[str], dict[str, int]]:
-    """Открывает ленту курса и возвращает найденные ссылки на Meet/Zoom (см. links.count_links)."""
-    _open_feed(page, course_url)
-    # Лента подгружается скриптами — ждём, пока число ссылок перестанет меняться.
-    previous = None
-    for attempt in range(6):
-        control.sleep(2)
-        order, counts = count_links(_collect(page))
-        if counts == previous and (order or attempt >= 3):
-            break
-        previous = counts
-    log.info("В ленте %s найдено ссылок на звонки: %d", course_url, len(order))
-    return order, counts
+    """Открывает ленту курса и возвращает ссылки на Meet/Zoom из постов (см. links.count_links)."""
+    urls = [href for href, _ in fetch_posts(page, course_url)]
+    if not urls:
+        # Если ссылка вставлена просто текстом и не превратилась в <a>.
+        urls = links_from_text(page.evaluate(
+            "() => { const m = document.querySelector('main') || document.body; return m ? m.innerText : ''; }"))
+    return count_links(urls)
 
 
 def _open_feed(page, course_url: str) -> None:

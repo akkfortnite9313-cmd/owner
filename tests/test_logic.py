@@ -301,8 +301,8 @@ def test_parse_when_next_year_and_titles():
     assert parse_when("5 березня о 9:00", dt.date(2026, 9, 23)) == (dt.datetime(2026, 3, 5, 9, 0), None)
     assert post_title(ZOOM_POST, "z") == "Конференції - Лекція №09 з Відеоінформаційних технологій"
     assert post_passcode(ZOOM_POST) == "111"
-    assert post_title("Олександр Чорний\n09:12\nЗаходьте на пару\nhttps://meet.google.com/x", "x") == \
-        "Олександр Чорний — Заходьте на пару"
+    assert post_title("Автор допису: Олександр Чорний\nОлександр Чорний\nСтворено 09:12\n09:12\nmore_vert\n"
+                      "Заходьте на пару\nhttps://meet.google.com/x", "x") == "Заходьте на пару (Олександр Чорний)"
 
 
 def test_auto_calls_flow(tmp_path):
@@ -378,3 +378,16 @@ def test_parse_post_prefers_time_next_to_link():
     # Без времени рядом со ссылкой — время из далёкого соседнего поста не берём.
     far = "Контрольна 26.09 о 12:00\n" + "\n".join(f"рядок {i}" for i in range(20)) + "\n" + LINK_MARK + "meet"
     assert parse_post(far, "m", dt.date(2026, 9, 23)).when is None
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Пʼятниця, 18 вересня · 10:40дп – 12:00пп", (dt.datetime(2026, 9, 18, 10, 40), None, dt.time(12, 0))),
+    ("пятница, 18 сентября · 10:40–12:00", (dt.datetime(2026, 9, 18, 10, 40), None, dt.time(12, 0))),
+    ("Friday, September 18⋅10:40 – 11:30am", (dt.datetime(2026, 9, 18, 10, 40), None, dt.time(11, 30))),
+    ("Friday, September 18⋅11:00 – 1:00pm", (dt.datetime(2026, 9, 18, 11, 0), None, dt.time(13, 0))),
+    ("Час: 23 вересня 2026 9:00 AM Київ", (dt.datetime(2026, 9, 23, 9, 0), None, None)),
+    ("Пара о 10:40–12:00", (None, dt.time(10, 40), dt.time(12, 0))),
+])
+def test_calendar_invite_times(text, expected):
+    from classbot.autofind import parse_when_range
+    assert parse_when_range(text, dt.date(2026, 9, 23)) == expected

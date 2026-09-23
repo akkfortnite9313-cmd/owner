@@ -346,45 +346,65 @@ UK_MONTHS = ["", "січня", "лютого", "березня", "квітня",
 
 
 def stream_html(extra_posts="", day=None):
+    """Лента как в настоящем Classroom: посты в [data-stream-item-id], кнопка Meet курса — в шапке,
+    сбоку и в меню (это не посты)."""
     day = day or (dt.date.today() + dt.timedelta(days=1))
+    course_meet = "https://meet.google.com/oef-jvwf-qvo?authuser=0&amp;hs=179"
     return f"""<html><body>
-<div class="left"><div>Meet</div><a href="https://meet.google.com/xyz-abcd-efg">Приєднатися</a></div>
-<div class="stream">
+<nav role="navigation"><a href="{course_meet}" aria-label="Приєднатися до відеодзвінка Meet"></a></nav>
+<ul role="menu" aria-label="Більше варіантів"><li><a role="menuitem" href="{course_meet}">Meet</a></li></ul>
+<main role="main"><section>
+ <aside role="complementary"><div>Meet</div><a href="{course_meet}" aria-label="Приєднатися"></a>
+   <div>Незабаром</div><div>На сьогодні</div></aside>
  {extra_posts}
- <div class="post"><div>Юрій Бурліков</div><div>09:12</div><div>Лабораторна робота 1. Термін здачі: 25.09 о 23:59</div></div>
- <div class="post"><div>Олександр Чорний</div><div>Учора</div>
+ <div data-stream-item-id="1"><div>Юрій Бурліков</div><div>Створено 09:12</div><div>09:12</div>
+   <div>Лабораторна робота 1. Термін здачі: 25.09 о 23:59</div></div>
+ <div data-stream-item-id="2"><div>Автор допису: Олександр Чорний</div><div>Олександр Чорний</div>
+   <div>Створено Учора</div><div>Учора</div><div>more_vert</div><div>Більше варіантів</div>
    <div class="body"><b>Олександр Чорний запрошує на заплановану конференцію Zoom студентів</b><br>
    Тема: Конференції - Лекція №09 з Відеоінформаційних технологій<br>
    Час: {day.day} {UK_MONTHS[day.month]} {day.year} 9:00 AM Київ<br>Приєднатися до конференції Zoom<br>
-   <a href="https://us04web.zoom.us/j/3637539970?pwd=3Sms84&amp;omn=765">https://us04web.zoom.us/j/3637539970?pwd=3Sms84&amp;omn=765</a><br><br>
+   <span><a href="https://us04web.zoom.us/j/3637539970?pwd=3Sms84&amp;omn=765">https://us04web.zoom.us/j/3637539970?pwd=3Sms84&amp;omn=765</a></span><br><br>
    Посилання на чат конференції<br><a href="https://us04web.zoom.us/launch/jc/76509568269">чат</a><br>
    Ідентифікатор конференції: 363 753 9970<br>Код доступу: 111</div>
    <div>Додати коментар</div></div>
- <div class="post"><div>Антон Правда публікує новий матеріал: "Лекція №8"</div><div>Учора</div></div>
-</div></body></html>"""
+ <div data-stream-item-id="3"><div>Автор допису: Артем Дворніченко</div><div>Артем Дворніченко</div>
+   <div>Створено 17 вер.</div><div>17 вер.</div>
+   <div>Група 80. Тема 5. Базові типи даних. Змінні. Константи.</div>
+   <div>Пʼятниця, {day.day} {UK_MONTHS[day.month]} · 10:40дп – 12:00пп</div><div>Часовий пояс: Europe/Kiev</div>
+   <div>Інформація для приєднання до зустрічі Google Meet</div>
+   <div>Посилання на відеодзвінок: <a href="https://meet.google.com/hzv-dkgs-ujk">https://meet.google.com/hzv-dkgs-ujk</a></div>
+   <div>Додати коментар</div></div>
+ <div data-stream-item-id="4"><div>Антон Правда публікує новий матеріал: "Лекція №8"</div><div>Учора</div></div>
+</section></main></body></html>"""
 
 
 def test_fetch_posts_gives_each_link_its_own_post(page):
-    from classbot.classroom import fetch_posts
+    from classbot.autofind import parse_post
+    from classbot.classroom import fetch_meet_links, fetch_posts
     page.route("https://classroom.google.com/**", lambda route: route.fulfill(
         status=200, content_type="text/html; charset=utf-8", body=stream_html(
-            '<div class="post"><div>Антон Правда</div><div>10:37</div>'
+            '<div data-stream-item-id="0"><div>Антон Правда</div><div>10:37</div>'
             '<div>Заходьте на пару <a href="https://meet.google.com/new-link-abc">meet</a></div></div>')))
     posts = dict((normalize_link(h), t) for h, t in fetch_posts(page, "https://classroom.google.com/c/abc")
                  if normalize_link(h))
-    assert set(posts) == {"https://meet.google.com/xyz-abcd-efg", "https://zoom.us/j/3637539970?pwd=3Sms84",
+    # Кнопка Meet курса (шапка, боковая карточка, меню) — не пост.
+    assert set(posts) == {"https://zoom.us/j/3637539970?pwd=3Sms84", "https://meet.google.com/hzv-dkgs-ujk",
                           "https://meet.google.com/new-link-abc"}
-    assert "Час:" in posts["https://zoom.us/j/3637539970?pwd=3Sms84"]
-    from classbot.autofind import parse_post
-    info = parse_post(posts["https://zoom.us/j/3637539970?pwd=3Sms84"], "z", dt.date.today())
+    zoom_text = posts["https://zoom.us/j/3637539970?pwd=3Sms84"]
+    assert "Код доступу: 111" in zoom_text and "Термін здачі" not in zoom_text and "Група 80" not in zoom_text
     tomorrow = dt.date.today() + dt.timedelta(days=1)
-    # Время — из приглашения рядом со ссылкой, а не срок сдачи задания из соседнего поста.
+    info = parse_post(zoom_text, "z", dt.date.today())
     assert info.when == dt.datetime.combine(tomorrow, dt.time(9, 0)), info
-    assert info.passcode == "111" and "Лекція №09" in info.title
-    assert "Код доступу: 111" in posts["https://zoom.us/j/3637539970?pwd=3Sms84"]
+    assert info.passcode == "111" and "Лекція №09" in info.title and "Олександр Чорний" in info.title
+    info = parse_post(posts["https://meet.google.com/hzv-dkgs-ujk"], "m", dt.date.today())
+    assert info.when == dt.datetime.combine(tomorrow, dt.time(10, 40)) and info.end_time == dt.time(12, 0), info
+    assert info.title.startswith("Група 80. Тема 5.") and "Артем Дворніченко" in info.title
     assert "Заходьте" in posts["https://meet.google.com/new-link-abc"]
-    assert "Час:" not in posts["https://meet.google.com/new-link-abc"]
-    assert "Час:" not in posts["https://meet.google.com/xyz-abcd-efg"]
+    assert parse_post(posts["https://meet.google.com/new-link-abc"], "m", dt.date.today()).when is None
+    # Для пар из расписания ссылки тоже берутся только из постов.
+    order, counts = fetch_meet_links(page, "https://classroom.google.com/c/abc")
+    assert "https://meet.google.com/oef-jvwf-qvo" not in counts and order[0] == "https://meet.google.com/new-link-abc"
 
 
 def test_runner_finds_calls_in_feed(tmp_path, monkeypatch):
@@ -414,13 +434,15 @@ def test_runner_finds_calls_in_feed(tmp_path, monkeypatch):
     assert (first.start, first.entry.link, first.entry.passcode) == (
         tomorrow9, "https://zoom.us/j/3637539970?pwd=3Sms84", "111")
 
-    extra["html"] = ('<div class="post"><div>Антон Правда</div><div>10:37</div>'
+    extra["html"] = ('<div data-stream-item-id="0"><div>Антон Правда</div><div>10:37</div>'
                      '<div>Заходьте <a href="https://meet.google.com/new-link-abc">meet</a></div></div>')
     r.scan_feeds()
     assert any("прямо сейчас" in m and "Захожу" in m for m in notifier.messages), notifier.messages
     now_call = r.pending(set())[0]
     assert now_call.entry.link == "https://meet.google.com/new-link-abc" and now_call.start <= dt.datetime.now()
-    assert len([m for m in notifier.messages if "Нашёл" in m]) == 2
+    # Zoom-лекция и пара Meet из приглашения Google Календаря (с временем конца) + новая ссылка без времени.
+    assert len([m for m in notifier.messages if "Нашёл" in m]) == 3, notifier.messages
+    assert any("Група 80" in m and "10:40–12:00" in m for m in notifier.messages), notifier.messages
 
 
 def test_diagnostics_report(tmp_path, monkeypatch):
@@ -443,9 +465,9 @@ def test_diagnostics_report(tmp_path, monkeypatch):
     paths = runner.Paths(tmp_path)
     report = tasks.diagnose_feed(cfg, paths)
     print(report)
-    assert "постов со ссылками на звонки (как видит бот): 2" in report
+    assert "постов со ссылками на звонки (как видит бот): 2" in report  # Zoom и Meet из постов
     assert "⟦ССЫЛКА⟧" in report and "код: 111" in report
     assert "https://zoom.us/j/3637539970?pwd=3Sms84" in report and "время понял: " in report
-    assert "блоки вокруг них" in report and "div.post" in report
+    assert "блоки вокруг них" in report and "data-stream-item-id" in report
     assert (paths.logs / "diagnostics.txt").read_text(encoding="utf-8") == report
     assert len(report) < 15001
