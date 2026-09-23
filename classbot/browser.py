@@ -132,8 +132,11 @@ def friendly_error(ex: BaseException) -> str:
     return first[:300]
 
 
-def launch(pw, settings: Settings, profile_dir: Path, executable: str | None = None, headless: bool = False):
-    """Открывает браузер с профилем бота. Камера и микрофон запрещены на уровне браузера."""
+def launch(pw, settings: Settings, profile_dir: Path, executable: str | None = None, background: bool = False):
+    """Открывает браузер с профилем бота. Камера и микрофон запрещены на уровне браузера.
+
+    background=True — обычное окно, но за пределами экрана (для проверки ленты в фоне). Невидимый
+    headless-режим не используем: Google может показывать ему страницы иначе."""
     # Если осталось открытым окно для входа (или другое окно с профилем бота), браузер
     # бота не запустится: Chrome просто передаст ему задание и закроется.
     close_profile_browser(profile_dir)
@@ -151,11 +154,13 @@ def launch(pw, settings: Settings, profile_dir: Path, executable: str | None = N
     ]
     if settings.mute_audio:
         args.append("--mute-audio")
+    if background:
+        args += ["--window-position=-32000,-32000", "--window-size=1280,900"]
     profile_dir.mkdir(parents=True, exist_ok=True)
     return pw.chromium.launch_persistent_context(
         user_data_dir=str(profile_dir),
         executable_path=executable or find_browser(settings),
-        headless=headless,
+        headless=False,
         args=args,
         ignore_default_args=IGNORED_DEFAULT_ARGS,
         no_viewport=True,

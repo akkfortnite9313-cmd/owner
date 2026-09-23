@@ -113,13 +113,48 @@ def parse_when(text: str, today: dt.date) -> tuple[dt.datetime | None, dt.time |
     return None, None
 
 
+LINK_MARK = "\u2063ССЫЛКА\u2063"  # где в тексте поста стоит ссылка (ставит classroom.POSTS_JS)
+
+
+def split_at_link(text: str) -> tuple[list[str], list[str]]:
+    """Строки текста до ссылки и после неё."""
+    before, _, after = text.partition(LINK_MARK) if LINK_MARK in text else (text, "", "")
+    return before.splitlines(), after.splitlines()
+
+
+def clean(text: str) -> str:
+    return text.replace(LINK_MARK, "")
+
+
+@dataclass
+class PostInfo:
+    when: dt.datetime | None
+    time_only: dt.time | None
+    title: str
+    passcode: str | None
+
+
+def parse_post(text: str, link: str, today: dt.date) -> PostInfo:
+    """Время, тема и код доступа — из строк рядом со ссылкой (сначала ближайшие), чтобы не
+    перепутать с датами из соседних постов (например, сроками сдачи заданий)."""
+    before, after = split_at_link(text)
+    when, time_only = None, None
+    for n in range(0, min(len(before), 15) + 1):
+        window = "\n".join(before[len(before) - n:] + after[:3])
+        when, time_only = parse_when(window, today)
+        if when or time_only:
+            break
+    near = "\n".join(before[-15:] + after[:10])
+    return PostInfo(when, time_only, post_title(near, link), post_passcode(near))
+
+
 def post_title(text: str, link: str) -> str:
     m = _TITLE_RE.search(text)
     if m:
         title = m.group(1).strip()
     else:
         # Первые содержательные строки поста (обычно имя преподавателя и начало сообщения).
-        lines = [ln.strip() for ln in text.splitlines()
+        lines = [ln.strip() for ln in clean(text).splitlines()
                  if len(ln.strip()) >= 4 and "http" not in ln and not re.fullmatch(r"[\d:. ]+", ln.strip())]
         title = " — ".join(lines[:2])
     title = re.sub(r"\s+", " ", title) or {"zoom": "Звонок Zoom", "meet": "Звонок Meet"}.get(platform_of(link), "Звонок")
@@ -157,15 +192,15 @@ class AutoCalls:
                duration: dt.timedelta, hours: tuple[dt.time, dt.time]) -> list[Found]:
         """Разбирает посты ленты. Возвращает звонки, найденные впервые и ещё не прошедшие."""
         found: list[Found] = []
-        texts: dict[str, str] = {}  # ссылка -> текст самого свежего (верхнего) поста с ней
+        infos: dict[str, PostInfo] = {}
         for href, text in posts:
             link = normalize_link(href)
             if not link:
                 continue
-            texts.setdefault(link, text)
-            when, _ = parse_when(text, now.date())
-            if when:
-                found.append(Found(link, post_title(text, link), when, post_passcode(text), "exact"))
+            info = parse_post(text, link, now.date())
+            infos.setdefault(link, info)
+            if info.when:
+                found.append(Found(link, info.title, info.when, info.passcode, "exact"))
 
         # Новые ссылки без даты — по тому, что их в ленте стало больше, чем в прошлый раз.
         order, counts = count_links(href for href, _ in posts)
@@ -176,10 +211,9 @@ class AutoCalls:
             for link in pick_new(order, counts, baseline):
                 if link in exact_links:
                     continue
-                text = texts.get(link, "")
-                _, time_only = parse_when(text, now.date())
-                if time_only:
-                    start = dt.datetime.combine(now.date(), time_only)
+                info = infos.get(link) or PostInfo(None, None, post_title("", link), None)
+                if info.time_only:
+                    start = dt.datetime.combine(now.date(), info.time_only)
                     if start + duration < now:
                         start += dt.timedelta(days=1)
                     kind = "time"
@@ -188,7 +222,7 @@ class AutoCalls:
                         log.info("Новая ссылка в ленте ночью, без времени — не захожу: %s", link)
                         continue
                     start, kind = now, "now"
-                found.append(Found(link, post_title(text, link), start, post_passcode(text), kind))
+                found.append(Found(link, info.title, start, info.passcode, kind))
 
         new = []
         calls = self.data["calls"]

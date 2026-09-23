@@ -90,10 +90,10 @@ class Runner:
         if self.on_status:
             self.on_status(text)
 
-    def launch(self, pw, headless: bool = False):
+    def launch(self, pw, background: bool = False):
         for attempt in range(3):
             try:
-                return launch(pw, self.s, self.paths.profile, self.executable, headless=headless)
+                return launch(pw, self.s, self.paths.profile, self.executable, background=background)
             except Exception as ex:
                 if attempt == 2:
                     raise
@@ -136,7 +136,7 @@ class Runner:
         self.next_scan = now() + minutes(self.s.auto_scan_min if _in_hours(now(), hours) else 60)
         try:
             with sync_playwright() as pw:
-                ctx = self.launch(pw, headless=True)
+                ctx = self.launch(pw, background=True)
                 try:
                     page = ctx.pages[0] if ctx.pages else ctx.new_page()
                     for course in self.s.auto_courses:
@@ -210,7 +210,7 @@ class Runner:
         log.info("Запоминаю текущие ссылки в ленте курса")
         try:
             with sync_playwright() as pw:
-                ctx = self.launch(pw, headless=True)
+                ctx = self.launch(pw, background=True)
                 try:
                     page = ctx.pages[0] if ctx.pages else ctx.new_page()
                     _, counts = classroom.fetch_meet_links(page, course)

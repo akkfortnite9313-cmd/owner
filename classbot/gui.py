@@ -515,7 +515,8 @@ class App:
         self.check_btn = ttk.Button(actions, text="Проверить всё", command=self.check)
         self.test_btn = ttk.Button(actions, text="Тестовый заход…", command=self.test_join)
         self.logs_btn = ttk.Button(actions, text="Папка с журналом", command=self.open_logs)
-        for b in (self.login_btn, self.check_btn, self.test_btn, self.logs_btn):
+        self.diag_btn = ttk.Button(actions, text="Диагностика ленты", command=self.diagnose)
+        for b in (self.login_btn, self.check_btn, self.test_btn, self.diag_btn, self.logs_btn):
             b.pack(side="left", padx=(0, 8))
         ttk.Label(f, foreground="gray", wraplength=880, justify="left", text=(
             "Как начать: 1) «Войти в аккаунты»  2) во вкладке «Расписание» включите автоматический режим и отметьте "
@@ -833,7 +834,7 @@ class App:
     def _update_buttons(self):
         bot, task = self.bot_running(), self.task_running()
         idle = not bot and not task
-        for b in (self.start_btn, self.login_btn, self.check_btn, self.test_btn):
+        for b in (self.start_btn, self.login_btn, self.check_btn, self.test_btn, self.diag_btn):
             b.state(["!disabled"] if idle else ["disabled"])
         self.stop_btn.state(["!disabled"] if (bot or task) and not control.stop_event.is_set() else ["disabled"])
         self.tg_btn.state(["!disabled"] if not task else ["disabled"])
@@ -943,6 +944,22 @@ class App:
         self.run_task("Проверка", lambda: tasks.check(cfg, self.paths, notifier), lambda problems: (
             messagebox.showwarning("Проверка", "Что поправить:\n\n" + "\n\n".join(f"• {p}" for p in problems))
             if problems else messagebox.showinfo("Проверка", "Всё в порядке.")))
+
+    def diagnose(self):
+        cfg = self.save()
+        if not cfg:
+            return
+        self.nb.select(self.tab_main)
+
+        def done(report):
+            self.root.clipboard_clear()
+            self.root.clipboard_append(report)
+            messagebox.showinfo("Диагностика ленты", (
+                "Готово. Отчёт скопирован в буфер обмена — вставьте его в чат с разработчиком (Ctrl+V).\n\n"
+                "Он же сохранён в папке с журналом: diagnostics.txt, а снимок ленты — diagnostics-feed.png.\n"
+                "В отчёте есть текст вашей ленты (посты, ссылки и коды доступа)."))
+
+        self.run_task("Диагностика ленты", lambda: tasks.diagnose_feed(cfg, self.paths), done)
 
     def test_join(self):
         cfg = self.save()

@@ -8,7 +8,7 @@ import time
 
 from . import control
 from .browser import close_profile_browser, find_browser, launch, open_plain_browser
-from .autofind import parse_when, post_title
+from .autofind import LINK_MARK, parse_post
 from .classroom import fetch_meet_links, fetch_posts, is_logged_in, list_courses
 from .config import Config, describe_source, upcoming
 from .errors import CallError, NotAdmitted, NotLoggedIn
@@ -214,14 +214,15 @@ def _report_posts(course: str, posts: list[tuple[str, str]], paths: Paths) -> No
         if not link or (link, text) in seen:
             continue
         seen.add((link, text))
-        when, time_only = parse_when(text, now.date())
+        info = parse_post(text, link, now.date())
+        when, time_only = info.when, info.time_only
         if when:
             note = f"{when:%d.%m.%Y %H:%M}" + (" (уже прошло)" if when < now - dt.timedelta(hours=2) else "")
         elif time_only:
             note = f"время {time_only:%H:%M} без даты"
         else:
             note = "время не указано"
-        log.info("  • %s — %s — %s", post_title(text, link), note, link)
+        log.info("  • %s — %s — %s", info.title, note, link)
         if len(seen) >= 8:
             break
 
@@ -279,3 +280,97 @@ def telegram_wait_for_chat(token: str, timeout_s: float = 180) -> str | None:
             return str(chats[-1])
         control.sleep(3)
     return None
+
+
+# --- диагностика: отчёт о том, как бот видит ленту (чтобы прислать разработчику) -----------
+
+_DIAG_JS = r"""() => {
+  const isCall = h => /meet\.google\.com\/|zoom\.us\//i.test(h) || /google\.com\/url\?/.test(h) && /meet\.google|zoom\.us/i.test(decodeURIComponent(h));
+  const describe = el => {
+    let d = el.tagName.toLowerCase();
+    if (el.id) d += '#' + el.id;
+    const cls = (el.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean).slice(0, 3);
+    if (cls.length) d += '.' + cls.join('.');
+    for (const a of ['role', 'aria-label', 'jsname', 'jscontroller']) {
+      const v = el.getAttribute(a);
+      if (v) d += `[${a}=${v.slice(0, 30)}]`;
+    }
+    const data = Array.from(el.attributes).map(a => a.name).filter(n => n.startsWith('data-')).slice(0, 4);
+    if (data.length) d += '{' + data.join(',') + '}';
+    return d + ` (${(el.innerText || '').length})`;
+  };
+  const anchors = Array.from(document.querySelectorAll('a[href]'));
+  const calls = anchors.filter(a => isCall(a.href)).slice(0, 8).map(a => {
+    const chain = [];
+    let n = a;
+    for (let i = 0; i < 14 && n; i++, n = n.parentElement) chain.push(describe(n));
+    return {href: a.href, chain};
+  });
+  const items = anchors.filter(a => /\/c\/[^/]+\/(m|a|sa|mc|p)\/[^/]+/.test(new URL(a.href, location.href).pathname))
+    .slice(0, 12).map(a => [a.getAttribute('href'), (a.innerText || '').trim().slice(0, 100)]);
+  const iframes = Array.from(document.querySelectorAll('iframe')).map(f => f.src).slice(0, 5);
+  return {url: location.href, title: document.title, anchors: anchors.length, calls, items, iframes,
+          text: (document.body ? document.body.innerText : '').slice(0, 5000)};
+}"""
+
+
+def diagnose_feed(cfg: Config, paths: Paths) -> str:
+    """Открывает ленты курсов и собирает короткий текстовый отчёт для разработчика."""
+    courses = list(cfg.settings.auto_courses) or sorted({c.course for c in cfg.classes if c.course})
+    if not courses:
+        raise NotLoggedIn("не выбран курс — отметьте его во вкладке «Расписание» (автоматический режим)")
+    now = dt.datetime.now()
+    out = [f"=== Диагностика ClassBot {now:%Y-%m-%d %H:%M} ===",
+           f"настройки: авто={cfg.settings.auto_enabled}, курсов={len(courses)}, пар в расписании={len(cfg.classes)}, "
+           f"длительность={cfg.settings.auto_duration_min:g} мин"]
+    auto = State(paths.state).data.get("auto", {})
+    out.append(f"найдено ранее звонков: {len(auto.get('calls', {}))}")
+    for rec in list(auto.get("calls", {}).values())[-5:]:
+        out.append(f"  • {rec.get('start')} {rec.get('kind')} {rec.get('title')} {rec.get('link')}")
+    paths.logs.mkdir(parents=True, exist_ok=True)
+    with _playwright() as pw:
+        ctx = launch(pw, cfg.settings, paths.profile)
+        try:
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            for course in courses[:2]:
+                out.append(f"\n=== Курс {course}")
+                try:
+                    posts = fetch_posts(page, course)
+                except NotLoggedIn:
+                    out.append(f"НЕ ВОШЁЛ В GOOGLE: страница открылась как {page.url}")
+                    continue
+                except Exception as ex:
+                    out.append(f"ошибка при открытии ленты: {str(ex).splitlines()[0]}")
+                    continue
+                diag = page.evaluate(_DIAG_JS)
+                out.append(f"адрес: {diag['url']} | заголовок: {diag['title']} | ссылок на странице: {diag['anchors']}")
+                out.append(f"постов со ссылками на звонки (как видит бот): {len(posts)}")
+                for href, text in posts[:8]:
+                    info = parse_post(text, normalize_link(href) or href, now.date())
+                    when, time_only = info.when, info.time_only
+                    understood = when and f"{when:%d.%m.%Y %H:%M}" or time_only and f"время {time_only:%H:%M}" or "нет"
+                    understood += f" | тема: {info.title} | код: {info.passcode or '-'}"
+                    compact = " / ".join(line.strip() for line in text.replace(LINK_MARK, " ⟦ССЫЛКА⟧ ").splitlines()
+                                         if line.strip())
+                    out.append(f"- ссылка: {normalize_link(href) or href}\n  время понял: {understood}\n  текст поста: {compact[:400]}")
+                out.append("ссылки на звонки и блоки вокруг них:")
+                for call in diag["calls"][:5]:
+                    out.append(f"- {call['href'][:120]}")
+                    out.extend(f"    {step}" for step in call["chain"])
+                if diag["items"]:
+                    out.append("материалы/задания в ленте:")
+                    out.extend(f"- {href} | {text}" for href, text in diag["items"])
+                if diag["iframes"]:
+                    out.append(f"iframes: {diag['iframes']}")
+                out.append("текст страницы (начало):")
+                out.append(diag["text"][:3500])
+                try:
+                    page.screenshot(path=str(paths.logs / "diagnostics-feed.png"), full_page=True)
+                except Exception:
+                    pass
+        finally:
+            ctx.close()
+    report = "\n".join(out)[:15000]
+    (paths.logs / "diagnostics.txt").write_text(report, encoding="utf-8")
+    log.info("Диагностика сохранена в %s", paths.logs / "diagnostics.txt")
+    return report

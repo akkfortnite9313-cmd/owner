@@ -113,7 +113,13 @@ POSTS_JS = r"""() => {
       if ((p.innerText || '').length > 4000 || keysIn(p).size > 1) break;
       node = p;
     }
-    out.push([real(a.href), node.innerText || '']);
+    // Помечаем место ссылки в тексте поста, чтобы время искать рядом с ней, а не в соседних постах.
+    const mark = document.createElement('span');
+    mark.textContent = '\u2063ССЫЛКА\u2063';
+    a.before(mark);
+    const text = node.innerText || '';
+    mark.remove();
+    out.push([real(a.href), text]);
   }
   return out;
 }"""

@@ -361,3 +361,20 @@ def test_friendly_error_and_profile_lock(tmp_path):
         (tmp_path / "SingletonLock").unlink()
         os.symlink("host-999999999", tmp_path / "SingletonLock")
         assert not profile_in_use(tmp_path)
+
+
+
+def test_parse_post_prefers_time_next_to_link():
+    from classbot.autofind import LINK_MARK, parse_post
+    text = ("Юрій Бурліков\n09:12\nЛабораторна робота 1. Термін здачі: 25.09 о 23:59\n"
+            "Олександр Чорний\nУчора\nТема: Лекція №09\nЧас: 24 вересня 2026 9:00 AM Київ\n"
+            "Приєднатися до конференції Zoom\n" + LINK_MARK + "https://us04web.zoom.us/j/3637539970?pwd=X\n"
+            "Код доступу: 111\nДодати коментар")
+    info = parse_post(text, "https://zoom.us/j/3637539970?pwd=X", dt.date(2026, 9, 23))
+    assert info.when == dt.datetime(2026, 9, 24, 9, 0) and info.title == "Лекція №09" and info.passcode == "111"
+    # Ссылка в той же строке, что и время.
+    info = parse_post("Антон Правда\n10:37\nПара о 10:40 " + LINK_MARK + "meet", "m", dt.date(2026, 9, 23))
+    assert info.when is None and info.time_only == dt.time(10, 40)
+    # Без времени рядом со ссылкой — время из далёкого соседнего поста не берём.
+    far = "Контрольна 26.09 о 12:00\n" + "\n".join(f"рядок {i}" for i in range(20)) + "\n" + LINK_MARK + "meet"
+    assert parse_post(far, "m", dt.date(2026, 9, 23)).when is None
