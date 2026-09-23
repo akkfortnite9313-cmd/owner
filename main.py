@@ -48,8 +48,8 @@ def setup_logging(paths: Paths, console: bool = True) -> None:
 def cmd_run(cfg, paths: Paths, notifier: Notifier, args) -> int:
     from classbot.runner import Runner
 
-    if not cfg.classes:
-        log.error("В расписании нет ни одной пары")
+    if not cfg.classes and not (cfg.settings.auto_enabled and cfg.settings.auto_courses):
+        log.error("Нет ни одной пары и не выбран курс для автоматического режима")
         return 1
     if not notifier.enabled:
         log.warning("Telegram не подключён — уведомлений не будет")

@@ -51,7 +51,7 @@ def _sandbox_supported() -> bool:
     return not (sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0)
 
 
-def launch(pw, settings: Settings, profile_dir: Path, executable: str | None = None):
+def launch(pw, settings: Settings, profile_dir: Path, executable: str | None = None, headless: bool = False):
     """Открывает браузер с профилем бота. Камера и микрофон запрещены на уровне браузера."""
     args = [
         # Любой запрос сайта на камеру/микрофон автоматически отклоняется —
@@ -71,7 +71,7 @@ def launch(pw, settings: Settings, profile_dir: Path, executable: str | None = N
     return pw.chromium.launch_persistent_context(
         user_data_dir=str(profile_dir),
         executable_path=executable or find_browser(settings),
-        headless=False,
+        headless=headless,
         args=args,
         # Без этих флагов Google хуже пускает в аккаунт, а куки из обычного окна не читаются.
         ignore_default_args=["--enable-automation", "--use-mock-keychain", "--password-store=basic"],

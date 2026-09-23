@@ -256,3 +256,88 @@ def test_config_turns_any_course_link_into_stream():
     c = parse_config({"classes": [{"name": "X", "days": "пн", "start": "09:00", "end": "10:00",
                                    "course": "https://classroom.google.com/w/ODc2MzY0NzU3Nzlz/t/all"}]})
     assert c.classes[0].course == "https://classroom.google.com/c/ODc2MzY0NzU3Nzlz"
+
+
+# --- автоматический режим ---
+
+from classbot.autofind import AutoCalls, parse_when, post_passcode, post_title  # noqa: E402
+from classbot.state import State  # noqa: E402
+
+ZOOM_POST = """Олександр Чорний
+Учора
+Олександр Чорний запрошує на заплановану конференцію Zoom студентів, які відсутні на очних заняттях
+
+Тема: Конференції - Лекція №09 з Відеоінформаційних технологій
+Час: 23 вересня 2026 9:00 AM Київ
+Приєднатися до конференції Zoom
+https://us04web.zoom.us/j/3637539970?pwd=3Sms84pcRJCbIPGjOEo4oblgpXi76d.1&omn=76509568269
+
+Посилання на чат конференції
+https://us04web.zoom.us/launch/jc/76509568269
+
+Ідентифікатор конференції: 363 753 9970
+Код доступу: 111
+Додати коментар"""
+
+
+@pytest.mark.parametrize("text, expected", [
+    (ZOOM_POST, (dt.datetime(2026, 9, 23, 9, 0), None)),
+    ("Topic: Math\nTime: Sep 24, 2026 01:30 PM Kyiv", (dt.datetime(2026, 9, 24, 13, 30), None)),
+    ("Тема: Физика\nВремя: 24 сент. 2026 09:00 AM Москва", (dt.datetime(2026, 9, 24, 9, 0), None)),
+    ("Пара 24.09 о 10:40, заходьте", (dt.datetime(2026, 9, 24, 10, 40), None)),
+    ("Завтра в 9:00 лекция", (dt.datetime(2026, 9, 24, 9, 0), None)),
+    ("Сьогодні о 12:20 практична", (dt.datetime(2026, 9, 23, 12, 20), None)),
+    ("Пара о 10:40\nhttps://meet.google.com/abc-defg-hij", (None, dt.time(10, 40))),
+    ("Заходьте на пару\nhttps://meet.google.com/abc-defg-hij", (None, None)),
+    ("Юрій Бурліков публікує нове завдання: \"Лабораторна робота 1\"\n09:12", (None, None)),
+    ("Олександр Чорний публікує новий матеріал: \"Лекція №09 BIT-123 Тема 2.3. Робот...\"\n08:02", (None, None)),
+])
+def test_parse_when(text, expected):
+    assert parse_when(text, dt.date(2026, 9, 23)) == expected
+
+
+def test_parse_when_next_year_and_titles():
+    assert parse_when("12 січня о 9:00", dt.date(2026, 12, 20)) == (dt.datetime(2027, 1, 12, 9, 0), None)
+    assert parse_when("5 березня о 9:00", dt.date(2026, 9, 23)) == (dt.datetime(2026, 3, 5, 9, 0), None)
+    assert post_title(ZOOM_POST, "z") == "Конференції - Лекція №09 з Відеоінформаційних технологій"
+    assert post_passcode(ZOOM_POST) == "111"
+    assert post_title("Олександр Чорний\n09:12\nЗаходьте на пару\nhttps://meet.google.com/x", "x") == \
+        "Олександр Чорний — Заходьте на пару"
+
+
+def test_auto_calls_flow(tmp_path):
+    auto = AutoCalls(State(tmp_path / "state.json"))
+    course = "https://classroom.google.com/c/abc"
+    hours = (dt.time(7, 0), dt.time(21, 0))
+    dur = dt.timedelta(minutes=80)
+    header = ("https://meet.google.com/aaa-bbbb-ccc", "Meet\nПриєднатися")
+    invite = ("https://us04web.zoom.us/j/3637539970?pwd=X&omn=1", ZOOM_POST.replace("23 вересня", "24 вересня"))
+    old_link = ("https://meet.google.com/old-link-xyz", "Вчорашня пара\nhttps://meet.google.com/old-link-xyz")
+
+    # Первый осмотр: приглашение на завтра найдено, старые ссылки без времени — нет.
+    t0 = dt.datetime(2026, 9, 23, 20, 0)
+    new = auto.update(course, [header, invite, old_link], t0, dur, hours)
+    assert [(f.link, f.start, f.kind, f.passcode) for f in new] == [
+        ("https://zoom.us/j/3637539970?pwd=X", dt.datetime(2026, 9, 24, 9, 0), "exact", "111")]
+    assert auto.update(course, [header, invite, old_link], t0, dur, hours) == []  # второй раз не сообщаем
+
+    # Утром появилась новая ссылка без времени — зайти сразу.
+    t1 = dt.datetime(2026, 9, 24, 10, 38)
+    fresh = ("https://meet.google.com/new-link-abc", "Антон Правда\n10:37\nЗаходьте")
+    new = auto.update(course, [fresh, header, invite, old_link], t1, dur, hours)
+    assert [(f.link, f.start, f.kind) for f in new] == [("https://meet.google.com/new-link-abc", t1, "now")]
+    # Ещё одна — со временем без даты.
+    later = ("https://meet.google.com/lat-erli-nkx", "Практика о 12:20")
+    new = auto.update(course, [later, fresh, header, invite, old_link], t1, dur, hours)
+    assert [(f.start, f.kind) for f in new] == [(dt.datetime(2026, 9, 24, 12, 20), "time")]
+    # Ночью ссылка без времени — не заходим.
+    night = ("https://meet.google.com/nig-htli-nkx", "Заходьте")
+    assert auto.update(course, [night, later, fresh, header, invite, old_link],
+                       dt.datetime(2026, 9, 24, 23, 30), dur, hours) == []
+
+    occ = auto.occurrences(dt.datetime(2026, 9, 24, 8, 0), dur)
+    assert [(o.start, o.entry.link, o.entry.passcode) for o in occ][:1] == [
+        (dt.datetime(2026, 9, 24, 9, 0), "https://zoom.us/j/3637539970?pwd=X", "111")]
+    # Всё сохранилось в state.json и переживает перезапуск.
+    again = AutoCalls(State(tmp_path / "state.json"))
+    assert len(again.occurrences(dt.datetime(2026, 9, 24, 8, 0), dur)) == len(occ)

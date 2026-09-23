@@ -78,19 +78,68 @@ def list_courses(page) -> list[dict]:
     return courses
 
 
+# Для каждой ссылки на звонок — текст её поста: поднимаемся от ссылки вверх по странице,
+# пока не упрёмся в соседний пост с другой ссылкой на звонок или в слишком большой блок.
+POSTS_JS = r"""() => {
+  const real = h => {
+    try {
+      const u = new URL(h);
+      if (/(^|\.)google\.com$/.test(u.hostname) && u.pathname === '/url')
+        return u.searchParams.get('q') || u.searchParams.get('url') || h;
+    } catch (e) {}
+    return h;
+  };
+  const keyOf = h => {
+    h = real(h);
+    let m = h.match(/zoom\.us\/(?:j|w|s|wc\/join|wc)\/(\d{9,12})/i);
+    if (m) return 'z' + m[1];
+    m = h.match(/zoom\.us\/my\/([\w.-]+)/i);
+    if (m) return 'zm' + m[1].toLowerCase();
+    m = h.match(/meet\.google\.com\/(lookup\/[^\/?#]+|[a-z]{3}-?[a-z]{4}-?[a-z]{3})(?:[\/?#]|$)/i);
+    if (m) return 'm' + m[1].toLowerCase().replace(/-/g, '');
+    return null;
+  };
+  const keysIn = el => {
+    const s = new Set();
+    for (const x of el.querySelectorAll('a[href]')) { const k = keyOf(x.href); if (k) s.add(k); }
+    return s;
+  };
+  const out = [];
+  for (const a of document.querySelectorAll('a[href]')) {
+    if (!keyOf(a.href)) continue;
+    let node = a;
+    for (let i = 0; i < 15 && node.parentElement; i++) {
+      const p = node.parentElement;
+      if ((p.innerText || '').length > 4000 || keysIn(p).size > 1) break;
+      node = p;
+    }
+    out.push([real(a.href), node.innerText || '']);
+  }
+  return out;
+}"""
+
+
+def fetch_posts(page, course_url: str) -> list[tuple[str, str]]:
+    """Открывает ленту курса и возвращает [(ссылка на звонок, текст её поста), …] сверху вниз."""
+    _open_feed(page, course_url)
+    previous, posts = None, []
+    for attempt in range(6):
+        control.sleep(2)
+        posts = [(href, text) for href, text in page.evaluate(POSTS_JS)]
+        if [h for h, _ in posts] == previous and (posts or attempt >= 3):
+            break
+        previous = [h for h, _ in posts]
+    log.info("В ленте %s постов со ссылками на звонки: %d", course_url, len(posts))
+    return posts
+
+
 def is_logged_in(page) -> bool:
     return (urlparse(page.url).hostname or "") == CLASSROOM_HOST
 
 
 def fetch_meet_links(page, course_url: str) -> tuple[list[str], dict[str, int]]:
     """Открывает ленту курса и возвращает найденные ссылки на Meet/Zoom (см. links.count_links)."""
-    page.goto(course_url, wait_until="domcontentloaded", timeout=60_000)
-    try:
-        page.wait_for_load_state("networkidle", timeout=15_000)
-    except Exception:
-        pass
-    if not is_logged_in(page):
-        raise NotLoggedIn(f"Classroom открылся как {page.url}")
+    _open_feed(page, course_url)
     # Лента подгружается скриптами — ждём, пока число ссылок перестанет меняться.
     previous = None
     for attempt in range(6):
@@ -101,3 +150,13 @@ def fetch_meet_links(page, course_url: str) -> tuple[list[str], dict[str, int]]:
         previous = counts
     log.info("В ленте %s найдено ссылок на звонки: %d", course_url, len(order))
     return order, counts
+
+
+def _open_feed(page, course_url: str) -> None:
+    page.goto(course_url, wait_until="domcontentloaded", timeout=60_000)
+    try:
+        page.wait_for_load_state("networkidle", timeout=15_000)
+    except Exception:
+        pass
+    if not is_logged_in(page):
+        raise NotLoggedIn(f"Classroom открылся как {page.url}")

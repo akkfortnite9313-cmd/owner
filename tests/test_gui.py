@@ -167,3 +167,48 @@ def test_schedule_shows_course_names(app):
     app.refresh_schedule()
     row = app.tree.item(app.tree.get_children()[0])["values"]
     assert "Матанализ 2 курс" in row[3]
+
+
+def test_auto_mode_courses_are_selected_and_saved(app):
+    from classbot.state import save_courses
+    course = {"name": "КІ-23-2/9-80", "url": "https://classroom.google.com/c/ODc2MzY0NzU3Nzlz"}
+    save_courses(app.paths.courses, [course])
+    app.courses = [course]
+    app.auto_var.set(True)
+    app._courses_updated()  # как после «Войти в аккаунты»: единственный курс отмечается сам
+    saved = load_config(app.paths.config)
+    assert saved.settings.auto_enabled and saved.settings.auto_courses == [course["url"]]
+    app.auto_duration_var.set("90")
+    assert app.save().settings.auto_duration_min == 90
+
+
+def test_start_with_auto_mode_and_no_schedule(app, monkeypatch):
+    from classbot import runner
+    monkeypatch.setattr(runner.Runner, "scan_feeds",
+                        lambda self: setattr(self, "next_scan", dt.datetime.now() + dt.timedelta(hours=1)))
+    app.cfg.classes.clear()
+    app.courses = [{"name": "КІ-23", "url": "https://classroom.google.com/c/abc"}]
+    app.auto_var.set(True)
+    app._courses_updated()
+    app.start_bot()
+    assert pump(app, app.bot_running, 5), app.shown
+    assert pump(app, lambda: "новых звонков" in app.status_var.get(), 5), app.status_var.get()
+    app.stop_bot()
+    assert pump(app, lambda: not app.bot_running(), 10)
+
+
+def test_found_calls_are_listed_on_main_tab(app):
+    from classbot.autofind import AutoCalls
+    from classbot.state import State
+    course = "https://classroom.google.com/c/abc"
+    auto = AutoCalls(State(app.paths.state))
+    day = dt.date.today() + dt.timedelta(days=1)
+    auto.update(course, [("https://us04web.zoom.us/j/3637539970?pwd=X",
+                          f"Тема: Лекція №10\nЧас: {day:%d.%m.%Y} о 9:00")],
+                dt.datetime.now(), dt.timedelta(minutes=80), (dt.time(0), dt.time(23, 59)))
+    app.cfg.classes.clear()
+    app.cfg.settings.auto_enabled = True
+    app.cfg.settings.auto_courses = [course]
+    app.refresh_upcoming()
+    rows = [app.upcoming_tree.item(i)["values"] for i in app.upcoming_tree.get_children()]
+    assert rows and rows[0][1] == "Лекція №10" and rows[0][2] == "найдено в ленте (Zoom)", rows

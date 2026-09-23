@@ -24,7 +24,9 @@ from .config import (DAY_SHORT, ClassEntry, Config, ConfigError, config_to_dict,
 from .links import normalize_link
 from .notify import Notifier
 from .paths import Paths
-from .state import load_courses
+from .state import State, load_courses
+from .autofind import AutoCalls
+from .links import platform_of
 
 log = logging.getLogger(__name__)
 
@@ -428,6 +430,13 @@ class App:
         st["watch_captions"] = self.captions_var.get()
         st["browser"] = BROWSERS[self.browser_box.current()][0] if self.browser_box.current() >= 0 else "auto"
         st["semester_start"] = self.semester_var.get().strip() or None
+        st["auto_enabled"] = self.auto_var.get()
+        st["auto_courses"] = [url for url, var in self.auto_course_vars.items() if var.get()]
+        text = self.auto_duration_var.get().strip().replace(",", ".")
+        try:
+            st["auto_duration_min"] = float(text)
+        except ValueError:
+            raise ConfigError(f"«Сколько сидеть на звонке»: нужно число минут, а не {text!r}") from None
         try:
             return parse_config(raw, self.paths.config)
         except ConfigError as ex:
@@ -504,9 +513,9 @@ class App:
         for b in (self.login_btn, self.check_btn, self.test_btn, self.logs_btn):
             b.pack(side="left", padx=(0, 8))
         ttk.Label(f, foreground="gray", wraplength=880, justify="left", text=(
-            "Как начать: 1) добавьте пары во вкладке «Расписание»  2) подключите Telegram во вкладке «Уведомления»  "
-            "3) «Войти в аккаунты»  4) «Тестовый заход» на свою встречу  5) «Запустить». "
-            "Компьютер должен оставаться включённым.")).pack(anchor="w", pady=(4, 10))
+            "Как начать: 1) «Войти в аккаунты»  2) во вкладке «Расписание» включите автоматический режим и отметьте "
+            "курс  3) подключите Telegram во вкладке «Уведомления»  4) «Проверить всё» — бот покажет, какие звонки "
+            "видит в ленте  5) «Запустить». Компьютер должен оставаться включённым.")).pack(anchor="w", pady=(4, 10))
 
         ttk.Label(f, text="Ближайшие пары", font=ui_font(11, True)).pack(anchor="w")
         self.upcoming_tree = ttk.Treeview(f, columns=("when", "name", "source"), show="headings", height=4)
@@ -523,9 +532,31 @@ class App:
 
     def _build_schedule(self):
         f = self.tab_schedule
+        auto = ttk.LabelFrame(f, text=" Автоматический режим ", padding=12)
+        auto.pack(fill="x", pady=(0, 14))
+        self.auto_var = tk.BooleanVar()
+        ttk.Checkbutton(auto, text="Сам находить звонки в ленте курса и заходить на них",
+                        variable=self.auto_var, command=self._auto_changed).pack(anchor="w")
+        ttk.Label(auto, text="Следить за курсами:").pack(anchor="w", padx=(28, 0), pady=(8, 0))
+        self.auto_courses_frame = ttk.Frame(auto)
+        self.auto_courses_frame.pack(anchor="w", padx=(28, 0))
+        self.auto_course_vars: dict[str, tk.BooleanVar] = {}
+        dur = ttk.Frame(auto)
+        dur.pack(anchor="w", padx=(28, 0), pady=(8, 0))
+        ttk.Label(dur, text="Сколько сидеть на звонке (время конца в постах обычно не пишут):").pack(side="left")
+        self.auto_duration_var = tk.StringVar()
+        ttk.Spinbox(dur, from_=20, to=240, textvariable=self.auto_duration_var, width=6).pack(side="left", padx=8)
+        ttk.Label(dur, text="мин").pack(side="left")
+        ttk.Label(auto, foreground="gray", wraplength=860, justify="left", text=(
+            "Бот каждые 5 минут смотрит ленту. Если в посте со ссылкой есть дата и время (как в приглашении Zoom: "
+            "«Час: 23 вересня 2026 9:00») — зайдёт к этому времени. Если появилась новая ссылка без даты — "
+            "зайдёт к указанному в посте времени («о 10:40») или сразу (с 7:00 до 21:00). О каждом найденном "
+            "звонке придёт сообщение в Telegram. С этим режимом расписание ниже можно не заполнять.")).pack(
+            anchor="w", pady=(8, 0))
+        ttk.Label(f, text="Постоянное расписание (необязательно)", font=ui_font(11, True)).pack(anchor="w", pady=(0, 4))
         cols = (("name", "Пара", 190), ("days", "Дни", 130), ("time", "Время", 110),
                 ("source", "Ссылка", 250), ("week", "Недели", 130))
-        self.tree = ttk.Treeview(f, columns=[c[0] for c in cols], show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(f, columns=[c[0] for c in cols], show="headings", selectmode="browse", height=5)
         for col, title, width in cols:
             self.tree.heading(col, text=title, anchor="w")
             self.tree.column(col, width=width, anchor="w")
@@ -538,10 +569,8 @@ class App:
         ttk.Button(buttons, text="Удалить", command=self.delete_class).pack(side="left")
         ttk.Button(buttons, text="Загрузить мои курсы из Classroom", command=self.load_courses).pack(side="right")
         ttk.Label(f, foreground="gray", wraplength=880, justify="left", text=(
-            "Для каждого предмета добавьте свою пару и выберите его курс — у каждого предмета своя лента, "
-            "и бот найдёт в ней ссылку на Meet или Zoom, которую выложит преподаватель. Список курсов бот "
-            "загружает сам после «Войти в аккаунты». Если ссылка на звонок всегда одна и та же, можно "
-            "вписать её напрямую.")).pack(anchor="w", pady=(10, 0))
+            "Сюда можно добавить пары с постоянным временем: бот за 15 минут до начала найдёт в ленте курса "
+            "свежую ссылку (или возьмёт постоянную ссылку на Meet/Zoom).")).pack(anchor="w", pady=(10, 0))
 
     def _build_telegram(self):
         f = self.tab_telegram
@@ -662,6 +691,10 @@ class App:
         self.captions_var.set(s.watch_captions)
         self.browser_box.current([b[0] for b in BROWSERS].index(s.browser) if s.browser in dict(BROWSERS) else 0)
         self.semester_var.set(f"{s.semester_start:%d.%m.%Y}" if s.semester_start else "")
+        self.auto_var.set(s.auto_enabled)
+        self.auto_duration_var.set(str(int(s.auto_duration_min)) if float(s.auto_duration_min).is_integer()
+                                   else str(s.auto_duration_min))
+        self.refresh_auto_courses(s.auto_courses)
         self.refresh_schedule()
         self.refresh_upcoming()
 
@@ -675,9 +708,61 @@ class App:
 
     def refresh_upcoming(self):
         self.upcoming_tree.delete(*self.upcoming_tree.get_children())
-        for occ in upcoming(self.cfg.classes, dt.datetime.now(), self.cfg.settings)[:6]:
+        now = dt.datetime.now()
+        s = self.cfg.settings
+        items = [(occ, self.source_label(occ.entry)) for occ in upcoming(self.cfg.classes, now, s)[:6]]
+        if s.auto_enabled and s.auto_courses:
+            try:
+                found = AutoCalls(State(self.paths.state)).occurrences(now, dt.timedelta(minutes=s.auto_duration_min))
+            except Exception:
+                found = []
+            scheduled = [occ for occ, _ in items]
+            for occ in found:
+                if not any(o.start < occ.end and occ.start < o.end for o in scheduled):
+                    platform = {"zoom": "Zoom", "meet": "Meet"}.get(platform_of(occ.entry.link or ""), "")
+                    items.append((occ, f"найдено в ленте ({platform})"))
+        items.sort(key=lambda item: item[0].start)
+        for occ, source in items[:6]:
             when = f"{DAY_NAMES[occ.start.weekday()]} {occ.start:%d.%m}  {occ.start:%H:%M}–{occ.end:%H:%M}"
-            self.upcoming_tree.insert("", "end", values=(when, occ.entry.name, self.source_label(occ.entry)))
+            self.upcoming_tree.insert("", "end", values=(when, occ.entry.name, source))
+
+    # --- автоматический режим ---
+
+    def refresh_auto_courses(self, selected: list[str] | None = None):
+        if selected is None:
+            selected = [url for url, var in self.auto_course_vars.items() if var.get()]
+        selected_ids = {course_id(u) for u in selected}
+        for child in self.auto_courses_frame.winfo_children():
+            child.destroy()
+        self.auto_course_vars = {}
+        courses = list(self.courses)
+        known = {course_id(c["url"]) for c in courses}
+        courses += [{"name": url, "url": url} for url in selected if course_id(url) not in known]
+        for c in courses:
+            var = tk.BooleanVar(value=course_id(c["url"]) in selected_ids)
+            ttk.Checkbutton(self.auto_courses_frame, text=c["name"], variable=var,
+                            command=lambda: self.save(quiet=True)).pack(anchor="w")
+            self.auto_course_vars[c["url"]] = var
+        if not courses:
+            ttk.Label(self.auto_courses_frame, foreground="gray", text=(
+                "Список курсов появится после «Войти в аккаунты» на главной вкладке "
+                "(или нажмите «Загрузить мои курсы из Classroom» ниже).")).pack(anchor="w")
+
+    def _select_all_courses_if_none(self):
+        if self.auto_var.get() and self.auto_course_vars and not any(v.get() for v in self.auto_course_vars.values()):
+            for var in self.auto_course_vars.values():
+                var.set(True)
+
+    def _auto_changed(self):
+        self._select_all_courses_if_none()
+        self.save(quiet=True)
+
+    def _courses_updated(self):
+        self.refresh_auto_courses()
+        self._select_all_courses_if_none()
+        self.save(quiet=True)
+        self.refresh_schedule()
+        self.refresh_upcoming()
 
     def source_label(self, entry: ClassEntry) -> str:
         if entry.course and not entry.link:
@@ -760,8 +845,9 @@ class App:
         cfg = self.save()
         if not cfg:
             return
-        if not cfg.classes:
-            messagebox.showwarning("Нет пар", "Сначала добавьте пары во вкладке «Расписание».")
+        if not cfg.classes and not (cfg.settings.auto_enabled and cfg.settings.auto_courses):
+            messagebox.showwarning("Нет пар", "Во вкладке «Расписание» включите автоматический режим и отметьте "
+                                              "курс (или добавьте пары вручную).")
             self.nb.select(self.tab_schedule)
             return
         notifier = Notifier(cfg.telegram.bot_token, cfg.telegram.chat_id)
@@ -893,8 +979,7 @@ class App:
     def _login_checked(self, ok):
         if ok:
             self.courses = load_courses(self.paths.courses)
-            self.refresh_schedule()
-            self.refresh_upcoming()
+            self._courses_updated()
             found = (f"\n\nНашёл ваших курсов: {len(self.courses)}. Теперь во вкладке «Расписание» при добавлении "
                      "пары курс можно просто выбрать из списка.") if self.courses else ""
             messagebox.showinfo("Вход", "Готово: бот вошёл в Google Classroom." + found)
@@ -913,8 +998,7 @@ class App:
 
         def done(courses):
             self.courses = courses or []
-            self.refresh_schedule()
-            self.refresh_upcoming()
+            self._courses_updated()
             if not self.courses:
                 messagebox.showwarning("Курсы", "На главной странице Classroom не нашлось ни одного курса. "
                                                 "Проверьте, что бот вошёл в тот аккаунт, через который вы учитесь.")

@@ -32,6 +32,9 @@ class State:
         }
         self._save()
 
+    def save(self) -> None:
+        self._save()
+
     def _save(self) -> None:
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -10,10 +10,11 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 from . import classroom, control, meet, zoom
+from .autofind import AutoCalls, _in_hours, describe_found
 from .browser import find_browser, launch
-from .config import Config, Occurrence, next_occurrence
+from .config import Config, Occurrence, parse_hours, upcoming
 from .errors import CallError, NotAdmitted, NotLoggedIn
-from .links import pick_new, platform_of
+from .links import normalize_link, pick_new, platform_of
 from .mentions import MentionWatcher
 from .notify import Notifier
 from .paths import Paths  # noqa: F401 — импортируют отсюда
@@ -80,16 +81,19 @@ class Runner:
         self.on_status = on_status
         self.state = State(paths.state)
         self.executable = find_browser(self.s)
+        self.auto = AutoCalls(self.state) if self.s.auto_enabled and self.s.auto_courses else None
+        self.next_scan = now()
+        self.last_login_notice: dt.datetime | None = None
 
     def status(self, text: str) -> None:
         log.info("%s", text)
         if self.on_status:
             self.on_status(text)
 
-    def launch(self, pw):
+    def launch(self, pw, headless: bool = False):
         for attempt in range(3):
             try:
-                return launch(pw, self.s, self.paths.profile, self.executable)
+                return launch(pw, self.s, self.paths.profile, self.executable, headless=headless)
             except Exception as ex:
                 if attempt == 2:
                     raise
@@ -98,22 +102,76 @@ class Runner:
                 control.sleep(20)
 
     def notify_login(self, detail: str = "") -> None:
+        # Не чаще раза в 3 часа: лента проверяется часто, а вход сам не появится.
+        if self.last_login_notice and now() - self.last_login_notice < dt.timedelta(hours=3):
+            return
+        self.last_login_notice = now()
         self.notifier.send("🔑 Бот не вошёл в аккаунт" + (f" ({detail})" if detail else "") +
                            ". Откройте ClassBot на компьютере и нажмите «Войти в аккаунты».")
+
+    @property
+    def auto_duration(self) -> dt.timedelta:
+        return minutes(self.s.auto_duration_min)
+
+    def pending(self, done: set[str]) -> list[Occurrence]:
+        """Все предстоящие пары: из расписания и найденные в лентах, по времени начала."""
+        items = [o for o in upcoming(self.cfg.classes, now(), self.s) if o.key not in done]
+        if self.auto:
+            scheduled = list(items)
+            for o in self.auto.occurrences(now(), self.auto_duration):
+                # Пара из расписания в это же время важнее: два звонка сразу не бывает.
+                if o.key in done or any(s.start < o.end and o.start < s.end for s in scheduled):
+                    continue
+                items.append(o)
+        items.sort(key=lambda o: (o.start, o.entry.name))
+        return items
+
+    def wait_until(self, target: dt.datetime) -> None:
+        """Ждать до target, но проснуться раньше, если пора смотреть ленту."""
+        sleep_until(min(target, self.next_scan) if self.auto else target)
+
+    def scan_feeds(self) -> None:
+        """Автоматический режим: посмотреть ленты и запомнить найденные звонки."""
+        hours = parse_hours(self.s.auto_hours)
+        self.next_scan = now() + minutes(self.s.auto_scan_min if _in_hours(now(), hours) else 60)
+        try:
+            with sync_playwright() as pw:
+                ctx = self.launch(pw, headless=True)
+                try:
+                    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                    for course in self.s.auto_courses:
+                        posts = classroom.fetch_posts(page, course)
+                        for found in self.auto.update(course, posts, now(), self.auto_duration, hours):
+                            action = "Захожу." if found.kind == "now" else "Зайду сам."
+                            self.notifier.send(f"📅 Нашёл в ленте звонок: {describe_found(found)}. {action}\n{found.link}")
+                finally:
+                    ctx.close()
+        except NotLoggedIn:
+            self.notify_login("Google")
+        except Exception as ex:
+            log.warning("Не удалось посмотреть ленту: %s", ex)
 
     def run_forever(self) -> None:
         keep_awake()
         done: set[str] = set()
         baselined: set[str] = set()
         announced = None
-        first = next_occurrence(self.cfg.classes, now(), self.s)
-        self.notifier.send("🤖 Бот запущен. Ближайшая пара: " + (first.describe() if first else "нет в расписании"))
+        if self.auto:
+            self.scan_feeds()
+        items = self.pending(done)
+        self.notifier.send("🤖 Бот запущен. Ближайшая пара: " + (items[0].describe() if items else "пока нет") +
+                           ("\nСлежу за лентой и захожу на найденные звонки сам." if self.auto else ""))
         while True:
-            occ = next_occurrence(self.cfg.classes, now(), self.s, done)
-            if occ is None:
-                self.status("В расписании нет пар")
-                control.sleep(3600)
+            if self.auto and now() >= self.next_scan:
+                self.scan_feeds()
+            items = self.pending(done)
+            if not items:
+                if announced != "none":
+                    self.status("Жду: в ленте пока нет новых звонков" if self.auto else "В расписании нет пар")
+                    announced = "none"
+                self.wait_until(now() + dt.timedelta(hours=1))
                 continue
+            occ = items[0]
             if occ.key != announced:
                 self.status(f"Жду пару {occ.describe()}")
                 announced = occ.key
@@ -123,25 +181,36 @@ class Runner:
             if course and occ.key not in baselined:
                 snap_at = occ.start - minutes(self.s.baseline_before_min)
                 if now() < snap_at:
-                    sleep_until(snap_at)
+                    self.wait_until(snap_at)
                     continue
                 baselined.add(occ.key)
                 if now() < wake_at:
                     self.take_baseline(course)
                     continue
             if now() < wake_at:
-                sleep_until(wake_at)
+                self.wait_until(wake_at)
                 continue
             self.run_session(occ)
             done.add(occ.key)
+            self.mark_joined(occ, done)
             announced = None
+
+    def mark_joined(self, occ: Occurrence, done: set[str]) -> None:
+        """На найденный в ленте звонок с той же ссылкой в это же время второй раз не заходим."""
+        if not self.auto:
+            return
+        link = normalize_link(occ.entry.link or "")
+        for other in self.auto.occurrences(now() - dt.timedelta(days=1), self.auto_duration):
+            same_link = link and normalize_link(other.entry.link or "") == link
+            if other.start < occ.end and (same_link or other.start >= occ.start):
+                done.add(other.key)
 
     def take_baseline(self, course: str) -> None:
         """Запоминает, какие ссылки уже есть в ленте, чтобы потом узнать новую."""
         log.info("Запоминаю текущие ссылки в ленте курса")
         try:
             with sync_playwright() as pw:
-                ctx = self.launch(pw)
+                ctx = self.launch(pw, headless=True)
                 try:
                     page = ctx.pages[0] if ctx.pages else ctx.new_page()
                     _, counts = classroom.fetch_meet_links(page, course)

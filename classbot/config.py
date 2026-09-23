@@ -63,6 +63,12 @@ class Settings:
     semester_start: dt.date | None = None
     display_name: str = ""       # имя для Zoom, если бот не вошёл в аккаунт Zoom
     zoom_mode: str = "browser"   # browser — веб-версия Zoom, app — приложение Zoom
+    # Автоматический режим: сам находить звонки в лентах этих курсов и заходить на них.
+    auto_enabled: bool = True
+    auto_courses: list = field(default_factory=list)
+    auto_duration_min: float = 80   # сколько сидеть, если время конца неизвестно
+    auto_scan_min: float = 5        # как часто смотреть ленту
+    auto_hours: str = "07:00-21:00"  # когда заходить по ссылке без времени сразу
 
 
 @dataclass
@@ -154,6 +160,25 @@ def parse_date(value, where: str) -> dt.date | None:
         raise ConfigError(f"{where}: дата должна быть вида 01.09.2026, а не {value!r}") from None
 
 
+def _parse_auto_courses(value) -> list[str]:
+    items = value if isinstance(value, list) else [value] if value else []
+    result = []
+    for item in items:
+        url = normalize_course_url(str(item))
+        if not url:
+            raise ConfigError(f"settings.auto_courses: не понимаю ссылку на курс {item!r}")
+        if url not in result:
+            result.append(url)
+    return result
+
+
+def parse_hours(value) -> tuple[dt.time, dt.time]:
+    m = re.fullmatch(r"\s*(\d{1,2}[:.]\d{2})\s*-\s*(\d{1,2}[:.]\d{2})\s*", str(value or ""))
+    if not m:
+        raise ConfigError(f"settings.auto_hours: нужно вида 07:00-21:00, а не {value!r}")
+    return parse_time(m.group(1), "settings.auto_hours"), parse_time(m.group(2), "settings.auto_hours")
+
+
 def _parse_class(raw: dict, idx: int) -> ClassEntry:
     if not isinstance(raw, dict):
         raise ConfigError(f"classes[{idx}]: ожидается описание пары (name, days, start, end, course)")
@@ -193,6 +218,10 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
             raise ConfigError(f"settings: неизвестный параметр {key!r}")
         if key == "semester_start":
             value = parse_date(value, "settings.semester_start")
+        elif key == "auto_courses":
+            value = _parse_auto_courses(value)
+        elif key == "auto_hours":
+            parse_hours(value)
         elif isinstance(getattr(Settings, key, None), bool):
             value = bool(value)
         elif isinstance(getattr(Settings, key, None), (int, float)):

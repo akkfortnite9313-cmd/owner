@@ -8,14 +8,16 @@ import time
 
 from . import control
 from .browser import find_browser, launch, open_plain_browser
-from .classroom import fetch_meet_links, is_logged_in, list_courses
+from .autofind import parse_when, post_title
+from .classroom import fetch_meet_links, fetch_posts, is_logged_in, list_courses
 from .config import Config, describe_source, upcoming
 from .errors import CallError, NotAdmitted, NotLoggedIn
 from .mentions import MentionWatcher
 from .notify import Notifier
 from .paths import Paths
 from .runner import platform_for
-from .state import State, save_courses
+from .links import normalize_link
+from .state import State, load_courses, save_courses
 
 log = logging.getLogger(__name__)
 
@@ -130,8 +132,11 @@ def check(cfg: Config, paths: Paths, notifier: Notifier) -> list[str]:
     log.info("Пар в расписании: %d", len(cfg.classes))
     for occ in upcoming(cfg.classes, dt.datetime.now(), cfg.settings)[:5]:
         log.info("  %s — %s", occ.describe(), describe_source(occ.entry))
-    if not cfg.classes:
-        problem("В расписании нет ни одной пары — добавьте их во вкладке «Расписание»")
+    auto = cfg.settings.auto_enabled
+    if auto and not cfg.settings.auto_courses:
+        problem("Автоматический режим включён, но не отмечен курс — отметьте его во вкладке «Расписание»")
+    if not cfg.classes and not (auto and cfg.settings.auto_courses):
+        problem("Нет ни одной пары: включите автоматический режим во вкладке «Расписание» или добавьте пары")
 
     if notifier.enabled:
         sent = notifier.send("🧪 Проверка: уведомления работают")
@@ -169,13 +174,26 @@ def check(cfg: Config, paths: Paths, notifier: Notifier) -> list[str]:
                          (", самая свежая: " + order[0]) if order else "")
                 # Всё, что уже лежит в ленте, считаем старым.
                 state.set_baseline(course, counts)
-            if not courses:
+            if auto:
+                for course in cfg.settings.auto_courses:
+                    control.check()
+                    try:
+                        posts = fetch_posts(page, course)
+                    except NotLoggedIn:
+                        problem("Бот не вошёл в Google — нажмите «Войти в аккаунты»")
+                        return problems
+                    except Exception as ex:
+                        problem(f"Не открылась лента курса {course} ({str(ex).splitlines()[0]})")
+                        continue
+                    opened += 1
+                    _report_posts(course, posts, paths)
+            if not courses and not (auto and cfg.settings.auto_courses):
                 page.goto("https://classroom.google.com/", wait_until="domcontentloaded", timeout=60_000)
                 control.sleep(3)
                 if not is_logged_in(page):
                     problem("Бот не вошёл в Google — нажмите «Войти в аккаунты»")
                     return problems
-            if opened or not courses:
+            if opened or not (courses or (auto and cfg.settings.auto_courses)):
                 log.info("Вход в Google: есть")
         finally:
             ctx.close()
@@ -186,6 +204,29 @@ def check(cfg: Config, paths: Paths, notifier: Notifier) -> list[str]:
     else:
         log.info("Проверка закончена: всё в порядке")
     return problems
+
+
+def _report_posts(course: str, posts: list[tuple[str, str]], paths: Paths) -> None:
+    """Пишет в журнал, какие звонки бот видит в ленте и какое время из постов понял."""
+    names = {c["url"]: c["name"] for c in load_courses(paths.courses)}
+    log.info("Автоматический режим, лента «%s»: постов со ссылками на звонки — %d", names.get(course, course), len(posts))
+    now = dt.datetime.now()
+    seen = set()
+    for href, text in posts:
+        link = normalize_link(href)
+        if not link or (link, text) in seen:
+            continue
+        seen.add((link, text))
+        when, time_only = parse_when(text, now.date())
+        if when:
+            note = f"{when:%d.%m.%Y %H:%M}" + (" (уже прошло)" if when < now - dt.timedelta(hours=2) else "")
+        elif time_only:
+            note = f"время {time_only:%H:%M} без даты"
+        else:
+            note = "время не указано"
+        log.info("  • %s — %s — %s", post_title(text, link), note, link)
+        if len(seen) >= 8:
+            break
 
 
 def test_join(cfg: Config, paths: Paths, notifier: Notifier, url: str, minutes: float = 3) -> bool:

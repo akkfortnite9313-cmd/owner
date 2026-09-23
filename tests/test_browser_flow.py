@@ -220,7 +220,7 @@ class FakeNotifier:
 @pytest.mark.parametrize("new_link, platform_name", [(B, "Google Meet"), (ZOOM_NEW, "Zoom")])
 def test_full_session(tmp_path, monkeypatch, new_link, platform_name):
     """Пара целиком: в ленте появилась новая ссылка → зашёл → упомянули в чате → вышел."""
-    def fake_launch(pw, settings, profile_dir, executable=None):
+    def fake_launch(pw, settings, profile_dir, executable=None, headless=False):
         # Как настоящий launch(), но без окна и с поддельными страницами Google и Zoom.
         browser = pw.chromium.launch()
         ctx = browser.new_context()
@@ -323,7 +323,7 @@ def test_check_lists_concrete_problems(tmp_path, monkeypatch):
     from classbot import tasks
     from classbot.notify import Notifier
 
-    def fake_launch(pw, settings, profile_dir, executable=None):
+    def fake_launch(pw, settings, profile_dir, executable=None, headless=False):
         browser = pw.chromium.launch()
         ctx = browser.new_context()
         install_routes(ctx, [A])
@@ -335,6 +335,83 @@ def test_check_lists_concrete_problems(tmp_path, monkeypatch):
     monkeypatch.setattr(tasks, "launch", fake_launch)
     cfg = Config(settings=Settings(browser_path=os.__file__), telegram=TelegramSettings(), classes=[])
     problems = tasks.check(cfg, runner.Paths(tmp_path), Notifier("", ""))
-    assert any("нет ни одной пары" in p for p in problems), problems
+    assert any("ни одной пары" in p for p in problems), problems
+    assert any("не отмечен курс" in p for p in problems), problems
     assert any("Telegram не подключён" in p for p in problems), problems
     assert not any("не вошёл" in p for p in problems), problems
+
+
+UK_MONTHS = ["", "січня", "лютого", "березня", "квітня", "травня", "червня", "липня", "серпня", "вересня",
+             "жовтня", "листопада", "грудня"]
+
+
+def stream_html(extra_posts="", day=None):
+    day = day or (dt.date.today() + dt.timedelta(days=1))
+    return f"""<html><body>
+<div class="left"><div>Meet</div><a href="https://meet.google.com/xyz-abcd-efg">Приєднатися</a></div>
+<div class="stream">
+ {extra_posts}
+ <div class="post"><div>Юрій Бурліков публікує нове завдання: "Лабораторна робота 1"</div><div>09:12</div></div>
+ <div class="post"><div>Олександр Чорний</div><div>Учора</div>
+   <div class="body"><b>Олександр Чорний запрошує на заплановану конференцію Zoom студентів</b><br>
+   Тема: Конференції - Лекція №09 з Відеоінформаційних технологій<br>
+   Час: {day.day} {UK_MONTHS[day.month]} {day.year} 9:00 AM Київ<br>Приєднатися до конференції Zoom<br>
+   <a href="https://us04web.zoom.us/j/3637539970?pwd=3Sms84&amp;omn=765">https://us04web.zoom.us/j/3637539970?pwd=3Sms84&amp;omn=765</a><br><br>
+   Посилання на чат конференції<br><a href="https://us04web.zoom.us/launch/jc/76509568269">чат</a><br>
+   Ідентифікатор конференції: 363 753 9970<br>Код доступу: 111</div>
+   <div>Додати коментар</div></div>
+ <div class="post"><div>Антон Правда публікує новий матеріал: "Лекція №8"</div><div>Учора</div></div>
+</div></body></html>"""
+
+
+def test_fetch_posts_gives_each_link_its_own_post(page):
+    from classbot.classroom import fetch_posts
+    page.route("https://classroom.google.com/**", lambda route: route.fulfill(
+        status=200, content_type="text/html; charset=utf-8", body=stream_html(
+            '<div class="post"><div>Антон Правда</div><div>10:37</div>'
+            '<div>Заходьте на пару <a href="https://meet.google.com/new-link-abc">meet</a></div></div>')))
+    posts = dict((normalize_link(h), t) for h, t in fetch_posts(page, "https://classroom.google.com/c/abc")
+                 if normalize_link(h))
+    assert set(posts) == {"https://meet.google.com/xyz-abcd-efg", "https://zoom.us/j/3637539970?pwd=3Sms84",
+                          "https://meet.google.com/new-link-abc"}
+    assert "Час:" in posts["https://zoom.us/j/3637539970?pwd=3Sms84"]
+    assert "Код доступу: 111" in posts["https://zoom.us/j/3637539970?pwd=3Sms84"]
+    assert "Заходьте" in posts["https://meet.google.com/new-link-abc"]
+    assert "Час:" not in posts["https://meet.google.com/new-link-abc"]
+    assert "Час:" not in posts["https://meet.google.com/xyz-abcd-efg"]
+
+
+def test_runner_finds_calls_in_feed(tmp_path, monkeypatch):
+    extra = {"html": ""}
+
+    def fake_launch(pw, settings, profile_dir, executable=None, headless=False):
+        browser = pw.chromium.launch()
+        ctx = browser.new_context()
+        ctx.route("https://classroom.google.com/**", lambda route: route.fulfill(
+            status=200, content_type="text/html; charset=utf-8", body=stream_html(extra["html"])))
+        ctx.new_page()
+        orig_close = ctx.close
+        ctx.close = lambda: (orig_close(), browser.close())
+        return ctx
+
+    monkeypatch.setattr(runner, "launch", fake_launch)
+    course = "https://classroom.google.com/c/abc"
+    settings = Settings(browser_path=os.__file__, auto_enabled=True, auto_courses=[course], auto_hours="00:00-23:59")
+    cfg = Config(settings=settings, telegram=TelegramSettings(), classes=[])
+    notifier = FakeNotifier()
+    r = runner.Runner(cfg, runner.Paths(tmp_path), notifier)
+
+    r.scan_feeds()
+    tomorrow9 = dt.datetime.combine(dt.date.today() + dt.timedelta(days=1), dt.time(9, 0))
+    assert any("Лекція №09" in m and "Зайду сам" in m for m in notifier.messages), notifier.messages
+    first = r.pending(set())[0]
+    assert (first.start, first.entry.link, first.entry.passcode) == (
+        tomorrow9, "https://zoom.us/j/3637539970?pwd=3Sms84", "111")
+
+    extra["html"] = ('<div class="post"><div>Антон Правда</div><div>10:37</div>'
+                     '<div>Заходьте <a href="https://meet.google.com/new-link-abc">meet</a></div></div>')
+    r.scan_feeds()
+    assert any("прямо сейчас" in m and "Захожу" in m for m in notifier.messages), notifier.messages
+    now_call = r.pending(set())[0]
+    assert now_call.entry.link == "https://meet.google.com/new-link-abc" and now_call.start <= dt.datetime.now()
+    assert len([m for m in notifier.messages if "Нашёл" in m]) == 2
