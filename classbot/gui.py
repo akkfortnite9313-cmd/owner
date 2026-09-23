@@ -8,6 +8,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from pathlib import Path
@@ -16,7 +17,7 @@ from tkinter.scrolledtext import ScrolledText
 from urllib.error import HTTPError
 
 from . import autostart, control, tasks
-from .browser import BrowserNotFound
+from .browser import BrowserNotFound, friendly_error, profile_in_use
 from .classroom import course_id
 from .errors import NotLoggedIn
 from .config import (DAY_SHORT, ClassEntry, Config, ConfigError, config_to_dict, default_config, describe_source,
@@ -328,13 +329,15 @@ class ClassDialog(tk.Toplevel):
 class LoginDialog(tk.Toplevel):
     """Пока открыт браузер для входа: инструкция и кнопка «Готово»."""
 
-    def __init__(self, parent, proc: subprocess.Popen, on_done):
+    def __init__(self, parent, proc: subprocess.Popen, profile: Path, on_done):
         super().__init__(parent)
         self.title("Вход в аккаунты")
         self.transient(parent)
         self.resizable(False, False)
         self.proc = proc
+        self.profile = profile
         self.on_done = on_done
+        self.started = time.monotonic()
         frm = ttk.Frame(self, padding=18)
         frm.pack(fill="both", expand=True)
         ttk.Label(frm, text="Открылось окно браузера бота", font=ui_font(13, True)).pack(anchor="w")
@@ -343,9 +346,10 @@ class LoginDialog(tk.Toplevel):
             "1. На вкладке Classroom войдите в Google-аккаунт, через который учитесь, "
             "и проверьте, что видны ваши курсы.\n"
             "2. Если преподаватели требуют вход в Zoom — войдите и на вкладке Zoom. Иначе её можно просто закрыть.\n"
-            "3. Закройте окно браузера — проверка начнётся сама."
+            "3. Закройте окно браузера — проверка начнётся сама (или нажмите кнопку ниже)."
         )).pack(anchor="w", pady=(8, 14))
-        ttk.Button(frm, text="Я вошёл, проверить", style="Accent.TButton", command=self._finish).pack(anchor="e")
+        ttk.Button(frm, text="Я вошёл — закрыть браузер и проверить", style="Accent.TButton",
+                   command=self._finish).pack(anchor="e")
         self.protocol("WM_DELETE_WINDOW", self._finish)
         self.wait_visibility()
         self.grab_set()
@@ -354,7 +358,8 @@ class LoginDialog(tk.Toplevel):
     def _watch(self):
         if not self.winfo_exists():
             return
-        if self.proc.poll() is not None:
+        # Ждём, пока закроется само окно браузера (запущенный процесс мог сразу передать его другому).
+        if self.proc.poll() is not None and not profile_in_use(self.profile) and time.monotonic() - self.started > 3:
             self._finish()
         else:
             self.after(500, self._watch)
@@ -915,7 +920,9 @@ class App:
             error = "Telegram не принял токен — проверьте, что скопировали его целиком" if ex.code == 401 else str(ex)
         except Exception as ex:
             log.exception("%s: ошибка", title)
-            error = str(ex)
+            error = friendly_error(ex)
+            if not error.startswith("Браузер бота уже открыт"):
+                error += "\n\nПодробности — в журнале (кнопка «Папка с журналом»)."
         self.post(self._task_finished, title, result, error, None if stopped else on_done)
 
     def _task_finished(self, title, result, error, on_done):
@@ -971,10 +978,11 @@ class App:
             return
 
         def verify():
-            tasks.finish_login(proc)
+            tasks.finish_login(proc, self.paths)
             return tasks.verify_login(cfg, self.paths)
 
-        LoginDialog(self.root, proc, lambda: self.run_task("Проверка входа", verify, self._login_checked))
+        LoginDialog(self.root, proc, self.paths.profile,
+                    lambda: self.run_task("Проверка входа", verify, self._login_checked))
 
     def _login_checked(self, ok):
         if ok:

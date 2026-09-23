@@ -66,7 +66,7 @@ def cmd_login(cfg, paths: Paths, notifier: Notifier, args) -> int:
     print("Войдите в Google-аккаунт для Classroom (и в Zoom, если преподаватели требуют вход), затем закройте окно.\n")
     proc = tasks.open_login_window(cfg, paths)
     input("Когда войдёте и закроете браузер — нажмите Enter...")
-    tasks.finish_login(proc)
+    tasks.finish_login(proc, paths)
     if tasks.verify_login(cfg, paths):
         print("\nГотово: бот вошёл в Google Classroom.")
         return 0
@@ -118,13 +118,23 @@ def cmd_selftest(args) -> int:
 
         import tempfile
 
-        from classbot.browser import WARNING_FLAGS, launch
+        import time
+
+        from classbot.browser import WARNING_FLAGS, launch, open_plain_browser, profile_in_use
 
         settings = Settings(browser_path=args.browser)
         exe = find_browser(settings)
-        # Браузер запускается ровно так же, как на паре (профиль, флаги, песочница).
+        # Браузер запускается ровно так же, как на паре (профиль, флаги, песочница). Перед этим
+        # открываем «окно для входа» и не закрываем его: бот должен закрыть его сам.
         with sync_playwright() as pw, tempfile.TemporaryDirectory() as tmp:
-            ctx = launch(pw, settings, Path(tmp) / "profile")
+            profile = Path(tmp) / "profile"
+            open_plain_browser(settings, profile, "about:blank")
+            deadline = time.monotonic() + 30
+            while not profile_in_use(profile) and time.monotonic() < deadline:
+                time.sleep(0.5)
+            if not profile_in_use(profile):
+                raise RuntimeError("не удалось определить, что окно для входа открыто")
+            ctx = launch(pw, settings, profile)
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             page.set_content("<p id=x>ok</p>")
             text = page.inner_text("#x")

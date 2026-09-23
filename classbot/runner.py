@@ -11,7 +11,7 @@ from playwright.sync_api import sync_playwright
 
 from . import classroom, control, meet, zoom
 from .autofind import AutoCalls, _in_hours, describe_found
-from .browser import find_browser, launch
+from .browser import find_browser, friendly_error, launch
 from .config import Config, Occurrence, parse_hours, upcoming
 from .errors import CallError, NotAdmitted, NotLoggedIn
 from .links import normalize_link, pick_new, platform_of
@@ -149,7 +149,7 @@ class Runner:
         except NotLoggedIn:
             self.notify_login("Google")
         except Exception as ex:
-            log.warning("Не удалось посмотреть ленту: %s", ex)
+            log.warning("Не удалось посмотреть ленту: %s", friendly_error(ex))
 
     def run_forever(self) -> None:
         keep_awake()
@@ -220,7 +220,7 @@ class Runner:
         except NotLoggedIn:
             self.notify_login("Google")
         except Exception as ex:
-            log.warning("Не удалось посмотреть ленту курса заранее: %s", ex)
+            log.warning("Не удалось посмотреть ленту курса заранее: %s", friendly_error(ex))
 
     def run_session(self, occ: Occurrence) -> None:
         self.status(f"Пара {occ.describe()}")
@@ -239,7 +239,7 @@ class Runner:
             self.notify_login(str(ex))
         except Exception as ex:
             log.exception("Ошибка на паре %s", occ.entry.name)
-            self.notifier.send(f"⚠️ Ошибка на паре «{occ.entry.name}»: {ex}")
+            self.notifier.send(f"⚠️ Ошибка на паре «{occ.entry.name}»: {friendly_error(ex)}")
 
 
 class Session:

@@ -341,3 +341,23 @@ def test_auto_calls_flow(tmp_path):
     # Всё сохранилось в state.json и переживает перезапуск.
     again = AutoCalls(State(tmp_path / "state.json"))
     assert len(again.occurrences(dt.datetime(2026, 9, 24, 8, 0), dur)) == len(occ)
+
+
+def test_friendly_error_and_profile_lock(tmp_path):
+    import os
+    import sys
+    from classbot.browser import friendly_error, profile_in_use
+    msg = friendly_error(Exception("BrowserType.launch_persistent_context: Opening in existing browser session.\nCall log: ..."))
+    assert msg.startswith("Браузер бота уже открыт")
+    assert friendly_error(Exception("Page.goto: net::ERR_INTERNET_DISCONNECTED\nCall log:\n - navigating")) == \
+        "Page.goto: net::ERR_INTERNET_DISCONNECTED"
+    if sys.platform == "win32":
+        (tmp_path / "lockfile").write_text("")
+        assert profile_in_use(tmp_path)
+    else:
+        assert not profile_in_use(tmp_path)
+        os.symlink(f"host-{os.getpid()}", tmp_path / "SingletonLock")
+        assert profile_in_use(tmp_path)
+        (tmp_path / "SingletonLock").unlink()
+        os.symlink("host-999999999", tmp_path / "SingletonLock")
+        assert not profile_in_use(tmp_path)

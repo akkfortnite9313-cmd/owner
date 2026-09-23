@@ -7,7 +7,7 @@ import subprocess
 import time
 
 from . import control
-from .browser import find_browser, launch, open_plain_browser
+from .browser import close_profile_browser, find_browser, launch, open_plain_browser
 from .autofind import parse_when, post_title
 from .classroom import fetch_meet_links, fetch_posts, is_logged_in, list_courses
 from .config import Config, describe_source, upcoming
@@ -34,14 +34,11 @@ def open_login_window(cfg: Config, paths: Paths) -> subprocess.Popen:
     return open_plain_browser(cfg.settings, paths.profile, *LOGIN_URLS)
 
 
-def finish_login(proc: subprocess.Popen) -> None:
-    """Ждёт, пока окно входа закроют (браузер сохраняет вход на диск при закрытии)."""
-    if proc.poll() is None:
-        try:
-            proc.wait(timeout=60)
-        except subprocess.TimeoutExpired:
-            proc.terminate()
-            time.sleep(3)
+def finish_login(proc: subprocess.Popen, paths: Paths) -> None:
+    """Закрывает окно входа, если его не закрыли сами (браузер сохраняет вход на диск при закрытии)."""
+    if not close_profile_browser(paths.profile) and proc.poll() is None:
+        proc.terminate()
+        time.sleep(3)
 
 
 def verify_login(cfg: Config, paths: Paths) -> bool:
