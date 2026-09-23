@@ -8,14 +8,14 @@ import time
 
 from . import control
 from .browser import find_browser, launch, open_plain_browser
-from .classroom import fetch_meet_links, is_logged_in
+from .classroom import fetch_meet_links, is_logged_in, list_courses
 from .config import Config, describe_source, upcoming
 from .errors import CallError, NotAdmitted, NotLoggedIn
 from .mentions import MentionWatcher
 from .notify import Notifier
 from .paths import Paths
 from .runner import platform_for
-from .state import State
+from .state import State, save_courses
 
 log = logging.getLogger(__name__)
 
@@ -54,10 +54,45 @@ def verify_login(cfg: Config, paths: Paths) -> bool:
             except Exception:
                 pass
             ok = is_logged_in(page)
+            if ok:
+                _remember_courses(page, paths)
         finally:
             ctx.close()
     log.info("Вход в Google: %s", "есть" if ok else "НЕТ")
     return ok
+
+
+def _remember_courses(page, paths: Paths) -> list[dict]:
+    """Запоминает список курсов, чтобы в окне пары курс можно было выбрать, а не вставлять ссылку."""
+    try:
+        courses = list_courses(page)
+    except Exception as ex:
+        log.warning("Не удалось прочитать список курсов: %s", ex)
+        return []
+    if courses:
+        save_courses(paths.courses, courses)
+        log.info("Курсов в Classroom: %d (%s)", len(courses), ", ".join(c["name"] for c in courses))
+    else:
+        log.warning("На главной странице Classroom не нашлось ни одного курса")
+    return courses
+
+
+def fetch_courses(cfg: Config, paths: Paths) -> list[dict]:
+    """Открывает Classroom и возвращает список курсов (и запоминает его)."""
+    with _playwright() as pw:
+        ctx = launch(pw, cfg.settings, paths.profile)
+        try:
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            page.goto("https://classroom.google.com/", wait_until="domcontentloaded", timeout=60_000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=15_000)
+            except Exception:
+                pass
+            if not is_logged_in(page):
+                raise NotLoggedIn("бот не вошёл в Google — сначала нажмите «Войти в аккаунты»")
+            return _remember_courses(page, paths)
+        finally:
+            ctx.close()
 
 
 def login_in_bot_window(cfg: Config, paths: Paths) -> bool:

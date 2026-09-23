@@ -17,11 +17,14 @@ from urllib.error import HTTPError
 
 from . import autostart, control, tasks
 from .browser import BrowserNotFound
+from .classroom import course_id
+from .errors import NotLoggedIn
 from .config import (DAY_SHORT, ClassEntry, Config, ConfigError, config_to_dict, default_config, describe_source,
                      load_config, parse_class, parse_config, save_config, upcoming)
 from .links import normalize_link
 from .notify import Notifier
 from .paths import Paths
+from .state import load_courses
 
 log = logging.getLogger(__name__)
 
@@ -65,16 +68,81 @@ class QueueLogHandler(logging.Handler):
             pass
 
 
+# --- копирование и вставка -------------------------------------------------------
+# В Tk сочетания Ctrl+V/C/X/A привязаны к латинским буквам, поэтому при русской раскладке
+# они не работают. Ловим их по коду клавиши и добавляем меню по правой кнопке мыши.
+
+_EDIT_CLASSES = ("Entry", "TEntry", "TCombobox", "TSpinbox", "Spinbox", "Text")
+_WIN_KEYCODES = {86: "<<Paste>>", 67: "<<Copy>>", 88: "<<Cut>>", 65: "<<SelectAll>>"}
+_CYRILLIC_KEYSYMS = {"cyrillic_em": "<<Paste>>", "cyrillic_es": "<<Copy>>", "cyrillic_che": "<<Cut>>",
+                     "cyrillic_ef": "<<SelectAll>>"}
+
+
+def clipboard_action(keycode: int, keysym: str, windows: bool) -> str | None:
+    """Какое действие выполнить для Ctrl+клавиша при нелатинской раскладке (None — Tk справится сам)."""
+    sym = (keysym or "").lower()
+    if sym in ("v", "c", "x", "a"):
+        return None
+    if windows:
+        return _WIN_KEYCODES.get(keycode)
+    return _CYRILLIC_KEYSYMS.get(sym)
+
+
+def _on_control_key(event):
+    action = clipboard_action(event.keycode, event.keysym, sys.platform == "win32")
+    if action:
+        event.widget.event_generate(action)
+        return "break"
+    return None
+
+
+def _show_edit_menu(event):
+    widget = event.widget
+    try:
+        widget.focus_set()
+    except tk.TclError:
+        pass
+    menu = tk.Menu(widget, tearoff=0)
+    for label, action in (("Вырезать", "<<Cut>>"), ("Копировать", "<<Copy>>"), ("Вставить", "<<Paste>>")):
+        menu.add_command(label=label, command=lambda a=action: widget.event_generate(a))
+    menu.add_separator()
+    menu.add_command(label="Выделить всё", command=lambda: widget.event_generate("<<SelectAll>>"))
+    try:
+        menu.tk_popup(event.x_root, event.y_root)
+    finally:
+        menu.grab_release()
+
+
+def install_edit_bindings(root: tk.Misc) -> None:
+    button = "<Button-2>" if sys.platform == "darwin" else "<Button-3>"
+    for cls in _EDIT_CLASSES:
+        root.bind_class(cls, "<Control-KeyPress>", _on_control_key, add="+")
+        root.bind_class(cls, button, _show_edit_menu, add="+")
+
+
+def paste_into(var: tk.StringVar, parent) -> None:
+    """Кнопка «Вставить»: кладёт в поле то, что сейчас в буфере обмена."""
+    try:
+        text = parent.clipboard_get()
+    except tk.TclError:
+        messagebox.showinfo("Вставить", "Буфер обмена пуст — сначала скопируйте ссылку.", parent=parent)
+        return
+    var.set(text.strip())
+
+
 class ClassDialog(tk.Toplevel):
     """Добавление / изменение пары."""
 
-    def __init__(self, parent, entry: ClassEntry | None, other_names: set[str]):
+    def __init__(self, parent, entry: ClassEntry | None, other_names: set[str],
+                 courses: list[dict] | None = None, on_load_courses=None):
         super().__init__(parent)
         self.title("Пара" if entry else "Новая пара")
         self.transient(parent)
         self.resizable(False, False)
         self.result: ClassEntry | None = None
         self.other_names = other_names
+        self.courses = list(courses or [])
+        self.on_load_courses = on_load_courses
 
         frm = ttk.Frame(self, padding=16)
         frm.pack(fill="both", expand=True)
@@ -84,11 +152,11 @@ class ClassDialog(tk.Toplevel):
         ttk.Label(frm, text="Название").grid(row=0, column=0, sticky="w", pady=4)
         self.name = tk.StringVar(value=entry.name if entry else "")
         name_entry = ttk.Entry(frm, textvariable=self.name, width=40)
-        name_entry.grid(row=0, column=1, columnspan=3, sticky="we", pady=4)
+        name_entry.grid(row=0, column=1, columnspan=2, sticky="we", pady=4)
 
         ttk.Label(frm, text="Дни").grid(row=1, column=0, sticky="w", pady=4)
         days = ttk.Frame(frm)
-        days.grid(row=1, column=1, columnspan=3, sticky="w", pady=4)
+        days.grid(row=1, column=1, columnspan=2, sticky="w", pady=4)
         self.days = []
         for i, label in enumerate(DAY_NAMES):
             var = tk.BooleanVar(value=bool(entry and i in entry.days))
@@ -97,7 +165,7 @@ class ClassDialog(tk.Toplevel):
 
         ttk.Label(frm, text="Время").grid(row=2, column=0, sticky="w", pady=4)
         times = ttk.Frame(frm)
-        times.grid(row=2, column=1, columnspan=3, sticky="w", pady=4)
+        times.grid(row=2, column=1, columnspan=2, sticky="w", pady=4)
         self.start = tk.StringVar(value=f"{entry.start:%H:%M}" if entry else "09:00")
         self.end = tk.StringVar(value=f"{entry.end:%H:%M}" if entry else "10:30")
         ttk.Label(times, text="с").pack(side="left")
@@ -106,43 +174,57 @@ class ClassDialog(tk.Toplevel):
         ttk.Entry(times, textvariable=self.end, width=7).pack(side="left", padx=6)
         ttk.Label(times, text="(например 09:00)", foreground="gray").pack(side="left", padx=6)
 
-        ttk.Separator(frm).grid(row=3, column=0, columnspan=4, sticky="we", pady=10)
-        ttk.Label(frm, text="Где брать ссылку на звонок").grid(row=4, column=0, columnspan=4, sticky="w")
+        ttk.Separator(frm).grid(row=3, column=0, columnspan=3, sticky="we", pady=10)
+        ttk.Label(frm, text="Где брать ссылку на звонок").grid(row=4, column=0, columnspan=3, sticky="w")
         self.source = tk.StringVar(value="link" if entry and entry.link else "course")
         ttk.Radiobutton(frm, text="Из ленты курса в Google Classroom — преподаватель выкладывает ссылку перед парой",
                         variable=self.source, value="course", command=self._toggle).grid(
-            row=5, column=0, columnspan=4, sticky="w", pady=(6, 2))
-        ttk.Label(frm, text="Ссылка на курс").grid(row=6, column=0, sticky="w", padx=(22, 0))
-        self.course = tk.StringVar(value=(entry.course or "") if entry else "")
-        self.course_entry = ttk.Entry(frm, textvariable=self.course, width=60)
-        self.course_entry.grid(row=6, column=1, columnspan=3, sticky="we", pady=2)
-        ttk.Label(frm, text="Откройте курс в Classroom и скопируйте адрес из адресной строки "
-                            "(https://classroom.google.com/c/…)", foreground="gray", wraplength=520).grid(
-            row=7, column=1, columnspan=3, sticky="w")
+            row=5, column=0, columnspan=3, sticky="w", pady=(6, 2))
+        ttk.Label(frm, text="Курс").grid(row=6, column=0, sticky="w", padx=(22, 0))
+        self.course = tk.StringVar(value=self._course_label(entry.course) if entry and entry.course else "")
+        self.course_box = ttk.Combobox(frm, textvariable=self.course, width=56,
+                                       values=[c["name"] for c in self.courses])
+        self.course_box.grid(row=6, column=1, sticky="we", pady=2)
+        self.course_box.bind("<<ComboboxSelected>>", self._course_picked)
+        course_buttons = ttk.Frame(frm)
+        course_buttons.grid(row=6, column=2, sticky="w", padx=(6, 0))
+        self.course_paste = ttk.Button(course_buttons, text="Вставить",
+                                       command=lambda: paste_into(self.course, self))
+        self.course_paste.pack(side="left")
+        self.load_btn = ttk.Button(course_buttons, text="Загрузить курсы", command=self._load_courses)
+        self.load_btn.pack(side="left", padx=(6, 0))
+        self.course_hint = tk.StringVar()
+        ttk.Label(frm, textvariable=self.course_hint, foreground="gray", wraplength=560, justify="left").grid(
+            row=7, column=1, columnspan=2, sticky="w")
+        self._update_course_hint()
 
         ttk.Radiobutton(frm, text="Постоянная ссылка на Google Meet или Zoom", variable=self.source, value="link",
-                        command=self._toggle).grid(row=8, column=0, columnspan=4, sticky="w", pady=(10, 2))
+                        command=self._toggle).grid(row=8, column=0, columnspan=3, sticky="w", pady=(10, 2))
         ttk.Label(frm, text="Ссылка").grid(row=9, column=0, sticky="w", padx=(22, 0))
         self.link = tk.StringVar(value=(entry.link or "") if entry else "")
-        self.link_entry = ttk.Entry(frm, textvariable=self.link, width=60)
-        self.link_entry.grid(row=9, column=1, columnspan=3, sticky="we", pady=2)
+        self.link_entry = ttk.Entry(frm, textvariable=self.link, width=58)
+        self.link_entry.grid(row=9, column=1, sticky="we", pady=2)
+        self.link_paste = ttk.Button(frm, text="Вставить", command=lambda: paste_into(self.link, self))
+        self.link_paste.grid(row=9, column=2, sticky="w", padx=(6, 0))
         ttk.Label(frm, text="Код Zoom").grid(row=10, column=0, sticky="w", padx=(22, 0))
+        code_row = ttk.Frame(frm)
+        code_row.grid(row=10, column=1, columnspan=2, sticky="w", pady=2)
         self.passcode = tk.StringVar(value=(entry.passcode or "") if entry else "")
-        self.passcode_entry = ttk.Entry(frm, textvariable=self.passcode, width=16)
-        self.passcode_entry.grid(row=10, column=1, sticky="w", pady=2)
-        ttk.Label(frm, text="нужен, только если Zoom спрашивает код и его нет в ссылке",
-                  foreground="gray").grid(row=10, column=2, columnspan=2, sticky="w", padx=6)
+        self.passcode_entry = ttk.Entry(code_row, textvariable=self.passcode, width=16)
+        self.passcode_entry.pack(side="left")
+        ttk.Label(code_row, text="нужен, только если Zoom спрашивает код и его нет в ссылке",
+                  foreground="gray").pack(side="left", padx=8)
 
-        ttk.Separator(frm).grid(row=11, column=0, columnspan=4, sticky="we", pady=10)
+        ttk.Separator(frm).grid(row=11, column=0, columnspan=3, sticky="we", pady=10)
         ttk.Label(frm, text="Недели").grid(row=12, column=0, sticky="w")
         weeks = ttk.Frame(frm)
-        weeks.grid(row=12, column=1, columnspan=3, sticky="w")
+        weeks.grid(row=12, column=1, columnspan=2, sticky="w")
         self.week = tk.StringVar(value=(entry.week or "") if entry else "")
         for value, label in WEEK_CHOICES:
             ttk.Radiobutton(weeks, text=label, variable=self.week, value=value).pack(side="left", padx=(0, 12))
 
         buttons = ttk.Frame(frm)
-        buttons.grid(row=13, column=0, columnspan=4, sticky="e", pady=(16, 0))
+        buttons.grid(row=13, column=0, columnspan=3, sticky="e", pady=(16, 0))
         ttk.Button(buttons, text="Отмена", command=self.destroy).pack(side="right", padx=(8, 0))
         ttk.Button(buttons, text="Сохранить", style="Accent.TButton", command=self._ok).pack(side="right")
 
@@ -153,11 +235,54 @@ class ClassDialog(tk.Toplevel):
         self.grab_set()
         name_entry.focus_set()
 
+    # --- курс ---
+
+    def _course_label(self, url: str) -> str:
+        cid = course_id(url)
+        for c in self.courses:
+            if cid and course_id(c["url"]) == cid:
+                return c["name"]
+        return url
+
+    def _course_url(self) -> str:
+        text = self.course.get().strip()
+        for c in self.courses:
+            if c["name"] == text:
+                return c["url"]
+        return text
+
+    def _course_picked(self, _event=None):
+        if not self.name.get().strip():
+            self.name.set(self.course.get())
+
+    def _update_course_hint(self):
+        if self.courses:
+            self.course_hint.set("Выберите курс из списка — ссылку на пару бот найдёт в его ленте сам. "
+                                 "Можно и вставить ссылку на курс из адресной строки браузера.")
+        else:
+            self.course_hint.set("Список курсов появится после «Войти в аккаунты» на главной вкладке "
+                                 "(или нажмите «Загрузить курсы»). Можно и вставить ссылку на курс "
+                                 "из адресной строки браузера: https://classroom.google.com/c/…")
+
+    def _load_courses(self):
+        if self.on_load_courses:
+            self.on_load_courses(self._courses_loaded)
+
+    def _courses_loaded(self, courses: list[dict]):
+        if not self.winfo_exists():
+            return
+        self.courses = list(courses or [])
+        self.course_box.configure(values=[c["name"] for c in self.courses])
+        self._update_course_hint()
+        if self.courses:
+            self.course_box.focus_set()
+
     def _toggle(self):
         course = self.source.get() == "course"
-        self.course_entry.configure(state="normal" if course else "disabled")
-        self.link_entry.configure(state="disabled" if course else "normal")
-        self.passcode_entry.configure(state="disabled" if course else "normal")
+        for widget in (self.course_box, self.course_paste, self.load_btn):
+            widget.configure(state="normal" if course else "disabled")
+        for widget in (self.link_entry, self.link_paste, self.passcode_entry):
+            widget.configure(state="disabled" if course else "normal")
 
     def _ok(self):
         days = [DAY_SHORT[i] for i, var in enumerate(self.days) if var.get()]
@@ -170,10 +295,15 @@ class ClassDialog(tk.Toplevel):
         raw = {"name": self.name.get().strip(), "days": days, "start": self.start.get().strip(),
                "end": self.end.get().strip(), "week": self.week.get() or None}
         if self.source.get() == "course":
-            if not self.course.get().strip():
-                messagebox.showerror("Пара", "Вставьте ссылку на курс в Classroom", parent=self)
+            course = self._course_url()
+            if not course:
+                messagebox.showerror("Пара", "Выберите курс из списка или вставьте ссылку на курс", parent=self)
                 return
-            raw["course"] = self.course.get().strip()
+            if not course_id(course):
+                messagebox.showerror("Пара", "Не понимаю, какой это курс. Выберите курс из списка или вставьте "
+                                             "ссылку вида https://classroom.google.com/c/…", parent=self)
+                return
+            raw["course"] = course
         else:
             if not self.link.get().strip():
                 messagebox.showerror("Пара", "Вставьте ссылку на Meet или Zoom", parent=self)
@@ -246,6 +376,8 @@ class App:
         self.closing = False
 
         self.cfg, load_error = self._load()
+        self.courses = load_courses(paths.courses)
+        install_edit_bindings(root)
         self._build()
         self._fill_from_config()
         self._update_buttons()
@@ -403,10 +535,12 @@ class App:
         ttk.Button(buttons, text="+ Добавить пару", style="Accent.TButton", command=self.add_class).pack(side="left")
         ttk.Button(buttons, text="Изменить", command=self.edit_class).pack(side="left", padx=8)
         ttk.Button(buttons, text="Удалить", command=self.delete_class).pack(side="left")
+        ttk.Button(buttons, text="Загрузить мои курсы из Classroom", command=self.load_courses).pack(side="right")
         ttk.Label(f, foreground="gray", wraplength=880, justify="left", text=(
-            "Для каждой пары укажите курс в Classroom — бот сам найдёт в ленте ссылку на Meet или Zoom, "
-            "которую выложит преподаватель. Если ссылка всегда одна и та же, можно вписать её напрямую.")).pack(
-            anchor="w", pady=(10, 0))
+            "Для каждого предмета добавьте свою пару и выберите его курс — у каждого предмета своя лента, "
+            "и бот найдёт в ней ссылку на Meet или Zoom, которую выложит преподаватель. Список курсов бот "
+            "загружает сам после «Войти в аккаунты». Если ссылка на звонок всегда одна и та же, можно "
+            "вписать её напрямую.")).pack(anchor="w", pady=(10, 0))
 
     def _build_telegram(self):
         f = self.tab_telegram
@@ -422,9 +556,13 @@ class App:
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 14))
         ttk.Label(f, text="Токен бота").grid(row=1, column=0, sticky="w", pady=4)
         self.token_var = tk.StringVar()
-        ttk.Entry(f, textvariable=self.token_var).grid(row=1, column=1, sticky="we", pady=4)
-        self.tg_btn = ttk.Button(f, text="Подключить", style="Accent.TButton", command=self.connect_telegram)
-        self.tg_btn.grid(row=1, column=2, padx=(8, 0))
+        token_row = ttk.Frame(f)
+        token_row.grid(row=1, column=1, columnspan=2, sticky="we", pady=4)
+        ttk.Entry(token_row, textvariable=self.token_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(token_row, text="Вставить", command=lambda: paste_into(self.token_var, self.root)).pack(
+            side="left", padx=(8, 0))
+        self.tg_btn = ttk.Button(token_row, text="Подключить", style="Accent.TButton", command=self.connect_telegram)
+        self.tg_btn.pack(side="left", padx=(8, 0))
         self.tg_status = tk.StringVar()
         ttk.Label(f, textvariable=self.tg_status, foreground="#1a7f37", wraplength=700).grid(
             row=2, column=1, columnspan=2, sticky="w")
@@ -532,13 +670,21 @@ class App:
             days = ", ".join(DAY_NAMES[d] for d in sorted(c.days))
             week = dict(WEEK_CHOICES).get(c.week or "", "")
             self.tree.insert("", "end", iid=str(i), values=(
-                c.name, days, f"{c.start:%H:%M}–{c.end:%H:%M}", describe_source(c), week))
+                c.name, days, f"{c.start:%H:%M}–{c.end:%H:%M}", self.source_label(c), week))
 
     def refresh_upcoming(self):
         self.upcoming_tree.delete(*self.upcoming_tree.get_children())
         for occ in upcoming(self.cfg.classes, dt.datetime.now(), self.cfg.settings)[:6]:
             when = f"{DAY_NAMES[occ.start.weekday()]} {occ.start:%d.%m}  {occ.start:%H:%M}–{occ.end:%H:%M}"
-            self.upcoming_tree.insert("", "end", values=(when, occ.entry.name, describe_source(occ.entry)))
+            self.upcoming_tree.insert("", "end", values=(when, occ.entry.name, self.source_label(occ.entry)))
+
+    def source_label(self, entry: ClassEntry) -> str:
+        if entry.course and not entry.link:
+            cid = course_id(entry.course)
+            for c in self.courses:
+                if cid and course_id(c["url"]) == cid:
+                    return f"лента курса «{c['name']}»"
+        return describe_source(entry)
 
     # --- расписание -------------------------------------------------------------
 
@@ -547,7 +693,7 @@ class App:
         return int(sel[0]) if sel else None
 
     def add_class(self):
-        dlg = ClassDialog(self.root, None, {c.name for c in self.cfg.classes})
+        dlg = ClassDialog(self.root, None, {c.name for c in self.cfg.classes}, self.courses, self.load_courses)
         self.root.wait_window(dlg)
         if dlg.result:
             self.cfg.classes.append(dlg.result)
@@ -559,7 +705,8 @@ class App:
             messagebox.showinfo("Расписание", "Выберите пару в списке")
             return
         entry = self.cfg.classes[idx]
-        dlg = ClassDialog(self.root, entry, {c.name for c in self.cfg.classes} - {entry.name})
+        dlg = ClassDialog(self.root, entry, {c.name for c in self.cfg.classes} - {entry.name}, self.courses,
+                          self.load_courses)
         self.root.wait_window(dlg)
         if dlg.result:
             self.cfg.classes[idx] = dlg.result
@@ -675,8 +822,8 @@ class App:
         except control.Stopped:
             stopped = True
             log.info("%s: остановлено", title)
-        except BrowserNotFound as ex:
-            error = str(ex)
+        except (BrowserNotFound, NotLoggedIn) as ex:
+            error = str(ex)[:1].upper() + str(ex)[1:]
         except HTTPError as ex:
             error = "Telegram не принял токен — проверьте, что скопировали его целиком" if ex.code == 401 else str(ex)
         except Exception as ex:
@@ -744,7 +891,12 @@ class App:
 
     def _login_checked(self, ok):
         if ok:
-            messagebox.showinfo("Вход", "Готово: бот вошёл в Google Classroom.")
+            self.courses = load_courses(self.paths.courses)
+            self.refresh_schedule()
+            self.refresh_upcoming()
+            found = (f"\n\nНашёл ваших курсов: {len(self.courses)}. Теперь во вкладке «Расписание» при добавлении "
+                     "пары курс можно просто выбрать из списка.") if self.courses else ""
+            messagebox.showinfo("Вход", "Готово: бот вошёл в Google Classroom." + found)
             return
         if messagebox.askyesno("Вход", "Бот не видит входа в Google.\n\nПопробовать войти прямо в окне бота? "
                                        "Войдите в открывшемся окне и закройте его."):
@@ -753,6 +905,25 @@ class App:
                 messagebox.showinfo("Вход", "Готово: бот вошёл в Google Classroom.") if ok2 else
                 messagebox.showerror("Вход", "Войти не получилось. Если Google пишет, что браузер небезопасен, "
                                              "установите Google Chrome и попробуйте снова.")))
+
+    def load_courses(self, callback=None):
+        """Загрузить список курсов из Classroom (для выбора курса в окне пары)."""
+        cfg = self.save(quiet=True) or self.cfg
+
+        def done(courses):
+            self.courses = courses or []
+            self.refresh_schedule()
+            self.refresh_upcoming()
+            if not self.courses:
+                messagebox.showwarning("Курсы", "На главной странице Classroom не нашлось ни одного курса. "
+                                                "Проверьте, что бот вошёл в тот аккаунт, через который вы учитесь.")
+            elif callback is None:
+                messagebox.showinfo("Курсы", f"Нашёл ваших курсов: {len(self.courses)}. Теперь при добавлении пары "
+                                             "курс можно выбрать из списка.")
+            if callback:
+                callback(self.courses)
+
+        self.run_task("Курсы", lambda: tasks.fetch_courses(cfg, self.paths), done)
 
     def connect_telegram(self):
         token = self.token_var.get().strip()

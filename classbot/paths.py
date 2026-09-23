@@ -38,5 +38,9 @@ class Paths:
         return self.base / "state.json"
 
     @property
+    def courses(self) -> Path:
+        return self.base / "courses.json"
+
+    @property
     def config(self) -> Path:
         return self.base / "config.yaml"

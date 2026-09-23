@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from urllib.parse import urlparse
 
 from . import control
@@ -20,6 +21,61 @@ def _collect(page) -> list[str]:
         # Если ссылка вставлена просто текстом и не превратилась в <a>.
         urls = links_from_text(page.evaluate("() => document.body ? document.body.innerText : ''"))
     return urls
+
+
+_COURSE_PATH_RE = re.compile(r"^/(?:u/\d+/)?c/([A-Za-z0-9_-]+)")
+
+# Ссылки на курсы на главной странице Classroom (карточки курсов и боковое меню).
+_COURSES_JS = r"""() => {
+  const out = [];
+  for (const a of document.querySelectorAll('a[href]')) {
+    let path;
+    try { path = new URL(a.href, location.href).pathname; } catch (e) { continue; }
+    const m = path.match(/^\/(?:u\/\d+\/)?c\/([A-Za-z0-9_-]+)\/?$/);
+    if (!m) continue;
+    let name = (a.innerText || '').trim().split('\n')[0] || a.getAttribute('aria-label') || '';
+    if (!name) {
+      const card = a.closest('li');
+      if (card) name = (card.innerText || '').trim().split('\n')[0];
+    }
+    out.push([m[1], name.trim()]);
+  }
+  return out;
+}"""
+
+
+def course_id(url: str) -> str | None:
+    """Номер курса из ссылки https://classroom.google.com/c/<номер>/... (или None)."""
+    parsed = urlparse((url or "").strip())
+    if (parsed.hostname or "") != CLASSROOM_HOST:
+        return None
+    m = _COURSE_PATH_RE.match(parsed.path)
+    return m.group(1) if m else None
+
+
+def list_courses(page) -> list[dict]:
+    """Курсы с главной страницы Classroom: [{"name": ..., "url": ...}]. Страница уже должна быть открыта."""
+    found: dict[str, str] = {}
+    previous = None
+    for attempt in range(8):
+        control.sleep(1.5)
+        found = {}
+        for cid, name in page.evaluate(_COURSES_JS):
+            if cid not in found or (name and not found[cid]):
+                found[cid] = name
+        if found and list(found) == previous:
+            break
+        previous = list(found)
+    courses, seen = [], set()
+    for cid, name in found.items():
+        label = name or f"Курс {cid}"
+        # Два курса с одинаковым названием различаем номером.
+        base, n = label, 2
+        while label in seen:
+            label, n = f"{base} ({n})", n + 1
+        seen.add(label)
+        courses.append({"name": label, "url": f"https://{CLASSROOM_HOST}/c/{cid}"})
+    return courses
 
 
 def is_logged_in(page) -> bool:

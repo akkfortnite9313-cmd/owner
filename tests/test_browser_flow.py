@@ -295,3 +295,25 @@ def test_zoom_captcha_and_passcode(page):
     zoom.join(page, "https://zoom.us/j/81234567890", timeout_s=20, passcode="777")
     inner = next(f for f in page.frames if "inner" in f.url)
     assert inner.evaluate("window.joinedWith.pwd") == "777"
+
+
+CLASSROOM_HOME = """<html><body>
+<nav><a href="/u/0/c/MTIz">Матанализ 2 курс</a><a href="/c/MTIz/a/Nzg5/details">Задание 1</a></nav>
+<ol>
+  <li><div>Матанализ 2 курс</div><a href="https://classroom.google.com/c/MTIz" aria-label=""></a></li>
+  <li><a href="https://classroom.google.com/c/NDU2"><div>Английский</div><div>Группа Б</div></a></li>
+  <li><a href="https://classroom.google.com/c/Nzg5" aria-label="Английский"></a></li>
+  <li><a href="https://classroom.google.com/h">Главная</a></li>
+</ol></body></html>"""
+
+
+def test_list_courses_from_classroom_home(page):
+    from classbot.classroom import list_courses
+    page.route("https://classroom.google.com/**", lambda route: route.fulfill(
+        status=200, content_type="text/html; charset=utf-8", body=CLASSROOM_HOME))
+    page.goto("https://classroom.google.com/")
+    assert list_courses(page) == [
+        {"name": "Матанализ 2 курс", "url": "https://classroom.google.com/c/MTIz"},
+        {"name": "Английский", "url": "https://classroom.google.com/c/NDU2"},
+        {"name": "Английский (2)", "url": "https://classroom.google.com/c/Nzg5"},
+    ]

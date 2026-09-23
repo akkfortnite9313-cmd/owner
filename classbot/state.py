@@ -1,4 +1,4 @@
-"""state.json: какие Meet-ссылки уже были в ленте каждого курса."""
+"""state.json: какие ссылки уже были в ленте каждого курса; courses.json: список курсов Classroom."""
 from __future__ import annotations
 
 import datetime as dt
@@ -36,3 +36,17 @@ class State:
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, self.path)
+
+
+def load_courses(path: Path) -> list[dict]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return [c for c in data if isinstance(c, dict) and c.get("name") and c.get("url")]
+    except (OSError, ValueError):
+        return []
+
+
+def save_courses(path: Path, courses: list[dict]) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(courses, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
