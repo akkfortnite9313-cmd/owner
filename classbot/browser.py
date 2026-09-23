@@ -45,6 +45,12 @@ def find_browser(settings: Settings) -> str:
                           "(https://www.google.com/chrome/) или укажите settings.browser_path")
 
 
+def _sandbox_supported() -> bool:
+    # Playwright по умолчанию выключает «песочницу» Chrome (--no-sandbox), и Chrome пишет об этом
+    # предупреждение. На обычном компьютере она работает; не работает только под root в Linux.
+    return not (sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0)
+
+
 def launch(pw, settings: Settings, profile_dir: Path, executable: str | None = None):
     """Открывает браузер с профилем бота. Камера и микрофон запрещены на уровне браузера."""
     args = [
@@ -70,6 +76,7 @@ def launch(pw, settings: Settings, profile_dir: Path, executable: str | None = N
         # Без этих флагов Google хуже пускает в аккаунт, а куки из обычного окна не читаются.
         ignore_default_args=["--enable-automation", "--use-mock-keychain", "--password-store=basic"],
         no_viewport=True,
+        chromium_sandbox=_sandbox_supported(),
     )
 
 

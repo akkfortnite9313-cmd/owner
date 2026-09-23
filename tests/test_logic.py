@@ -4,7 +4,8 @@ import pytest
 
 from classbot.config import (ConfigError, Settings, config_to_dict, load_config, next_occurrence, parse_config,
                              parse_date, save_config, upcoming, week_parity)
-from classbot.links import (count_links, links_from_text, normalize_link, normalize_meet_link, pick_new,
+from classbot.links import (count_links, links_from_text, normalize_course_url, normalize_link,
+                            normalize_meet_link, pick_new,
                             platform_of, with_lang, zoom_app_url, zoom_web_url)
 from classbot.mentions import MentionWatcher
 
@@ -237,3 +238,21 @@ def test_bad_settings_values():
         parse_config({"settings": {"zoom_mode": "desktop"}, "classes": []})
     with pytest.raises(ConfigError, match="число"):
         parse_config({"settings": {"join_before_min": "две"}, "classes": []})
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("https://classroom.google.com/c/NjQ3ODk1", "https://classroom.google.com/c/NjQ3ODk1"),
+    ("https://classroom.google.com/w/ODc2MzY0NzU3Nzlz/t/all", "https://classroom.google.com/c/ODc2MzY0NzU3Nzlz"),
+    ("classroom.google.com/u/1/c/NjQ3/a/Nzg5/details", "https://classroom.google.com/u/1/c/NjQ3"),
+    ("https://classroom.google.com/r/NjQ3/sort-last-name", "https://classroom.google.com/c/NjQ3"),
+    ("https://classroom.google.com/h", None),
+    ("https://example.com/c/NjQ3", None),
+])
+def test_normalize_course_url(url, expected):
+    assert normalize_course_url(url) == expected
+
+
+def test_config_turns_any_course_link_into_stream():
+    c = parse_config({"classes": [{"name": "X", "days": "пн", "start": "09:00", "end": "10:00",
+                                   "course": "https://classroom.google.com/w/ODc2MzY0NzU3Nzlz/t/all"}]})
+    assert c.classes[0].course == "https://classroom.google.com/c/ODc2MzY0NzU3Nzlz"

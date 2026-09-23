@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import logging
-import re
 from urllib.parse import urlparse
 
 from . import control
 from .errors import NotLoggedIn  # noqa: F401 — импортируют отсюда
-from .links import count_links, links_from_text
+from .links import count_links, links_from_text, normalize_course_url
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +22,6 @@ def _collect(page) -> list[str]:
     return urls
 
 
-_COURSE_PATH_RE = re.compile(r"^/(?:u/\d+/)?c/([A-Za-z0-9_-]+)")
 
 # Ссылки на курсы на главной странице Classroom (карточки курсов и боковое меню).
 _COURSES_JS = r"""() => {
@@ -31,26 +29,23 @@ _COURSES_JS = r"""() => {
   for (const a of document.querySelectorAll('a[href]')) {
     let path;
     try { path = new URL(a.href, location.href).pathname; } catch (e) { continue; }
-    const m = path.match(/^\/(?:u\/\d+\/)?c\/([A-Za-z0-9_-]+)\/?$/);
+    const m = path.match(/^\/((?:u\/\d+\/)?)c\/([A-Za-z0-9_-]+)\/?$/);
     if (!m) continue;
     let name = (a.innerText || '').trim().split('\n')[0] || a.getAttribute('aria-label') || '';
     if (!name) {
       const card = a.closest('li');
       if (card) name = (card.innerText || '').trim().split('\n')[0];
     }
-    out.push([m[1], name.trim()]);
+    out.push([m[1] + 'c/' + m[2], name.trim()]);
   }
   return out;
 }"""
 
 
 def course_id(url: str) -> str | None:
-    """Номер курса из ссылки https://classroom.google.com/c/<номер>/... (или None)."""
-    parsed = urlparse((url or "").strip())
-    if (parsed.hostname or "") != CLASSROOM_HOST:
-        return None
-    m = _COURSE_PATH_RE.match(parsed.path)
-    return m.group(1) if m else None
+    """Номер курса из любой ссылки на курс Classroom (или None)."""
+    normalized = normalize_course_url(url)
+    return normalized.rsplit("/", 1)[1] if normalized else None
 
 
 def list_courses(page) -> list[dict]:
@@ -60,21 +55,26 @@ def list_courses(page) -> list[dict]:
     for attempt in range(8):
         control.sleep(1.5)
         found = {}
-        for cid, name in page.evaluate(_COURSES_JS):
-            if cid not in found or (name and not found[cid]):
-                found[cid] = name
+        paths: dict[str, str] = {}
+        for path, name in page.evaluate(_COURSES_JS):
+            if path.startswith("u/0/"):
+                path = path[4:]  # первый аккаунт — адрес без /u/0/
+            cid = path.rsplit("/", 1)[1]
+            paths.setdefault(cid, path)
+            if paths[cid] not in found or (name and not found[paths[cid]]):
+                found[paths[cid]] = name
         if found and list(found) == previous:
             break
         previous = list(found)
     courses, seen = [], set()
-    for cid, name in found.items():
-        label = name or f"Курс {cid}"
+    for path, name in found.items():
+        label = name or f"Курс {path.rsplit('/', 1)[1]}"
         # Два курса с одинаковым названием различаем номером.
         base, n = label, 2
         while label in seen:
             label, n = f"{base} ({n})", n + 1
         seen.add(label)
-        courses.append({"name": label, "url": f"https://{CLASSROOM_HOST}/c/{cid}"})
+        courses.append({"name": label, "url": f"https://{CLASSROOM_HOST}/{path}"})
     return courses
 
 

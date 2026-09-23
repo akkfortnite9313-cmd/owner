@@ -162,3 +162,17 @@ def zoom_app_url(link: str, name: str = "") -> str | None:
     if name:
         params["uname"] = name
     return "zoommtg://zoom.us/join?" + urlencode(params)
+
+
+_COURSE_URL_RE = re.compile(r"^/(u/\d+/)?(?:c|w|r)/([A-Za-z0-9_-]+)")
+
+
+def normalize_course_url(url: str) -> str | None:
+    """Любая ссылка на курс Classroom (лента /c/…, задания /w/…, люди /r/…) -> ссылка на ленту курса."""
+    parsed = _parse(url)
+    if not parsed or (parsed.hostname or "").lower() != "classroom.google.com":
+        return None
+    m = _COURSE_URL_RE.match(parsed.path)
+    if not m:
+        return None
+    return f"https://classroom.google.com/{m.group(1) or ''}c/{m.group(2)}"

@@ -10,7 +10,7 @@ from typing import Iterable
 
 import yaml
 
-from .links import normalize_link, platform_of
+from .links import normalize_course_url, normalize_link, platform_of
 
 
 class ConfigError(Exception):
@@ -169,8 +169,11 @@ def _parse_class(raw: dict, idx: int) -> ClassEntry:
     link = str(raw.get("link") or raw.get("meet") or "").strip() or None
     if not course and not link:
         raise ConfigError(f"{where}: укажите ссылку на курс в Classroom или постоянную ссылку на Meet/Zoom")
-    if course and "classroom.google.com" not in course:
-        raise ConfigError(f"{where}: ссылка на курс должна быть вида https://classroom.google.com/c/...")
+    if course:
+        normalized = normalize_course_url(course)
+        if not normalized:
+            raise ConfigError(f"{where}: ссылка на курс должна быть вида https://classroom.google.com/c/...")
+        course = normalized
     if link and not normalize_link(link):
         raise ConfigError(f"{where}: не понимаю ссылку {link!r} — нужна ссылка на Google Meet "
                           "(https://meet.google.com/abc-defg-hij) или Zoom (https://zoom.us/j/123456789)")

@@ -116,15 +116,24 @@ def cmd_selftest(args) -> int:
         from classbot.browser import find_browser
         from classbot.config import Settings
 
-        exe = args.browser or find_browser(Settings())
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(executable_path=exe, headless=True)
-            page = browser.new_page()
+        import tempfile
+
+        from classbot.browser import launch
+
+        settings = Settings(browser_path=args.browser)
+        exe = find_browser(settings)
+        # Браузер запускается ровно так же, как на паре (профиль, флаги, песочница).
+        with sync_playwright() as pw, tempfile.TemporaryDirectory() as tmp:
+            ctx = launch(pw, settings, Path(tmp) / "profile")
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
             page.set_content("<p id=x>ok</p>")
             text = page.inner_text("#x")
-            browser.close()
+            page.goto("chrome://version")
+            command_line = page.inner_text("#command_line")
+            ctx.close()
+        if "--no-sandbox" in command_line and sys.platform == "win32":
+            raise RuntimeError("Chrome запущен с --no-sandbox")
         # Окно программы: tkinter, тема и иконка должны были попасть в сборку.
-        import tempfile
         import tkinter as tk
         from tkinter import ttk
 
@@ -138,7 +147,7 @@ def cmd_selftest(args) -> int:
             app._destroy()
         if not asset("icon.png").exists():
             raise RuntimeError("нет assets/icon.png")
-        out.write_text(f"OK page={text} theme={theme} browser={exe}", encoding="utf-8")
+        out.write_text(f"OK page={text} theme={theme} browser={exe}\ncommand line: {command_line}", encoding="utf-8")
         return 0
     except Exception as ex:  # noqa: BLE001
         out.write_text(f"FAIL {type(ex).__name__}: {ex}", encoding="utf-8")

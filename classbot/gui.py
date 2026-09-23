@@ -301,9 +301,10 @@ class ClassDialog(tk.Toplevel):
                 return
             if not course_id(course):
                 messagebox.showerror("Пара", "Не понимаю, какой это курс. Выберите курс из списка или вставьте "
-                                             "ссылку вида https://classroom.google.com/c/…", parent=self)
+                                             "ссылку на курс из браузера (https://classroom.google.com/…)",
+                                     parent=self)
                 return
-            raw["course"] = course
+            raw["course"] = course  # любая ссылка на курс превратится в ссылку на его ленту
         else:
             if not self.link.get().strip():
                 messagebox.showerror("Пара", "Вставьте ссылку на Meet или Zoom", parent=self)

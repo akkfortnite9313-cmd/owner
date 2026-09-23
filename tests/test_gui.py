@@ -157,9 +157,9 @@ def test_course_picked_from_list(app):
     dlg3.course.set("просто текст")
     dlg3._ok()
     assert dlg3.result is None and "Не понимаю, какой это курс" in app.shown[-1][1]
-    dlg3.course.set("https://classroom.google.com/u/1/c/Nzg5/t/all")
+    dlg3.course.set("https://classroom.google.com/w/ODc2MzY0NzU3Nzlz/t/all")
     dlg3._ok()
-    assert dlg3.result.course == "https://classroom.google.com/u/1/c/Nzg5/t/all"
+    assert dlg3.result.course == "https://classroom.google.com/c/ODc2MzY0NzU3Nzlz"
 
 
 def test_schedule_shows_course_names(app):
