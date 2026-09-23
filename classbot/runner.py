@@ -5,44 +5,24 @@ import datetime as dt
 import logging
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-from . import classroom, meet
+from . import classroom, control, meet, zoom
 from .browser import find_browser, launch
-from .classroom import NotLoggedIn
 from .config import Config, Occurrence, next_occurrence
-from .links import pick_new
+from .errors import CallError, NotAdmitted, NotLoggedIn
+from .links import pick_new, platform_of
+from .mentions import MentionWatcher
 from .notify import Notifier
+from .paths import Paths  # noqa: F401 — импортируют отсюда
 from .state import State
 
 log = logging.getLogger(__name__)
 
 MAX_REJOINS = 3
 KEEP_SCREENSHOTS = 40
-
-
-@dataclass
-class Paths:
-    base: Path
-
-    @property
-    def profile(self) -> Path:
-        return self.base / "chrome-profile"
-
-    @property
-    def logs(self) -> Path:
-        return self.base / "logs"
-
-    @property
-    def state(self) -> Path:
-        return self.base / "state.json"
-
-    @property
-    def config(self) -> Path:
-        return self.base / "config.yaml"
 
 
 def now() -> dt.datetime:
@@ -59,16 +39,20 @@ def sleep_until(target: dt.datetime) -> None:
         left = (target - now()).total_seconds()
         if left <= 0:
             return
-        time.sleep(min(left, 30))
+        control.sleep(min(left, 30))
 
 
 def keep_awake() -> None:
-    """Не даёт Windows уснуть, пока бот запущен (экран при этом гаснуть может)."""
+    """Не даёт Windows уснуть, пока работает поток бота (экран при этом гаснуть может)."""
     if sys.platform != "win32":
         return
     import ctypes
     es_continuous, es_system_required = 0x80000000, 0x00000001
     ctypes.windll.kernel32.SetThreadExecutionState(es_continuous | es_system_required)
+
+
+def platform_for(link: str):
+    return zoom if platform_of(link) == "zoom" else meet
 
 
 def screenshot(page, logs_dir: Path, tag: str) -> Path | None:
@@ -88,13 +72,19 @@ def screenshot(page, logs_dir: Path, tag: str) -> Path | None:
 
 
 class Runner:
-    def __init__(self, cfg: Config, paths: Paths, notifier: Notifier):
+    def __init__(self, cfg: Config, paths: Paths, notifier: Notifier, on_status=None):
         self.cfg = cfg
         self.s = cfg.settings
         self.paths = paths
         self.notifier = notifier
+        self.on_status = on_status
         self.state = State(paths.state)
         self.executable = find_browser(self.s)
+
+    def status(self, text: str) -> None:
+        log.info("%s", text)
+        if self.on_status:
+            self.on_status(text)
 
     def launch(self, pw):
         for attempt in range(3):
@@ -103,13 +93,13 @@ class Runner:
             except Exception as ex:
                 if attempt == 2:
                     raise
-                log.warning("Браузер не запустился (%s). Возможно, профиль бота открыт в другом окне — "
+                log.warning("Браузер не запустился (%s). Возможно, окно бота уже открыто — "
                             "пробую ещё раз через 20 с", ex)
-                time.sleep(20)
+                control.sleep(20)
 
-    def notify_login(self) -> None:
-        self.notifier.send("🔑 Бот не вошёл в Google (или вход слетел). "
-                           "Запустите на компьютере 2_login.bat и войдите заново.")
+    def notify_login(self, detail: str = "") -> None:
+        self.notifier.send("🔑 Бот не вошёл в аккаунт" + (f" ({detail})" if detail else "") +
+                           ". Откройте ClassBot на компьютере и нажмите «Войти в аккаунты».")
 
     def run_forever(self) -> None:
         keep_awake()
@@ -121,14 +111,14 @@ class Runner:
         while True:
             occ = next_occurrence(self.cfg.classes, now(), self.s, done)
             if occ is None:
-                log.info("В расписании нет пар — проверю снова через час")
-                time.sleep(3600)
+                self.status("В расписании нет пар")
+                control.sleep(3600)
                 continue
             if occ.key != announced:
-                log.info("Следующая пара: %s", occ.describe())
+                self.status(f"Жду пару {occ.describe()}")
                 announced = occ.key
 
-            course = None if occ.entry.meet else occ.entry.course
+            course = None if occ.entry.link else occ.entry.course
             wake_at = occ.start - minutes(self.s.look_for_link_before_min if course else self.s.join_before_min)
             if course and occ.key not in baselined:
                 snap_at = occ.start - minutes(self.s.baseline_before_min)
@@ -144,6 +134,7 @@ class Runner:
                 continue
             self.run_session(occ)
             done.add(occ.key)
+            announced = None
 
     def take_baseline(self, course: str) -> None:
         """Запоминает, какие ссылки уже есть в ленте, чтобы потом узнать новую."""
@@ -158,12 +149,12 @@ class Runner:
                 finally:
                     ctx.close()
         except NotLoggedIn:
-            self.notify_login()
+            self.notify_login("Google")
         except Exception as ex:
             log.warning("Не удалось посмотреть ленту курса заранее: %s", ex)
 
     def run_session(self, occ: Occurrence) -> None:
-        log.info("===== %s =====", occ.describe())
+        self.status(f"Пара {occ.describe()}")
         try:
             with sync_playwright() as pw:
                 ctx = self.launch(pw)
@@ -175,8 +166,8 @@ class Runner:
                     except Exception:
                         pass
         except NotLoggedIn as ex:
-            log.error("Нет входа в Google: %s", ex)
-            self.notify_login()
+            log.error("Нет входа в аккаунт: %s", ex)
+            self.notify_login(str(ex))
         except Exception as ex:
             log.exception("Ошибка на паре %s", occ.entry.name)
             self.notifier.send(f"⚠️ Ошибка на паре «{occ.entry.name}»: {ex}")
@@ -191,10 +182,10 @@ class Session:
         self.ctx = ctx
         self.occ = occ
         self.name = occ.entry.name
-        self.course = None if occ.entry.meet else occ.entry.course
+        self.course = None if occ.entry.link else occ.entry.course
         self.baseline = runner.state.baseline(self.course) if self.course else None
         self.leave_at = occ.end + minutes(self.s.stay_after_end_min)
-        self.meet_page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        self.page = ctx.pages[0] if ctx.pages else ctx.new_page()
         self.cls_page = None
 
     def notify(self, text: str) -> None:
@@ -212,26 +203,32 @@ class Session:
         try:
             self._run()
         finally:
-            self.update_baseline()
+            if not control.stop_event.is_set():
+                self.update_baseline()
 
     def _run(self) -> None:
-        if self.occ.entry.meet:
-            link, fallback = self.occ.entry.meet, False
+        if self.occ.entry.link:
+            link, fallback = self.occ.entry.link, False
         else:
+            self.r.status(f"Ищу ссылку в ленте курса: «{self.name}»")
             link, fallback = self.wait_for_link()
             if not link:
                 return
         sleep_until(self.occ.start - minutes(self.s.join_before_min))
 
+        if platform_of(link) == "zoom" and self.s.zoom_mode == "app":
+            self.run_zoom_app(link)
+            return
+
         rejoins = 0
         while now() < self.leave_at:
-            if not self.join(link, first=rejoins == 0, fallback=fallback):
+            if not self.join(link, first=rejoins == 0):
                 return
             outcome, info = self.stay(link, fallback)
             if outcome == "time_up":
                 break
             if outcome == "new_link":
-                meet.leave(self.meet_page)
+                platform_for(link).leave(self.page)
                 self.notify(f"🔁 «{self.name}»: в ленте появилась новая ссылка, перехожу\n{info}")
                 link, fallback = info, False
                 continue
@@ -243,10 +240,23 @@ class Session:
                 self.notify(f"⚠️ «{self.name}»: вылетаю из звонка уже {MAX_REJOINS} раз, больше не захожу.")
                 return
             self.notify(f"⚠️ «{self.name}»: вылетел из звонка ({info}). Захожу снова…")
-            time.sleep(15)
+            control.sleep(15)
 
-        meet.leave(self.meet_page)
+        platform_for(link).leave(self.page)
         self.notify(f"👋 Пара «{self.name}» закончилась, вышел из звонка")
+
+    def run_zoom_app(self, link: str) -> None:
+        try:
+            zoom.open_app(link, self.s.display_name)
+        except (CallError, OSError) as ex:
+            self.fail(f"не получилось открыть приложение Zoom: {ex}")
+            return
+        self.r.status(f"На паре «{self.name}» (приложение Zoom)")
+        self.notify(f"✅ «{self.name}»: открыл встречу в приложении Zoom ({self.occ.start:%H:%M}–"
+                    f"{self.occ.end:%H:%M}). В этом режиме бот не видит, пустили ли его, и не следит за чатом.\n{link}")
+        sleep_until(self.leave_at)
+        zoom.close_app()
+        self.notify(f"👋 Пара «{self.name}» закончилась, закрыл Zoom")
 
     # --- ссылка из ленты -------------------------------------------------
 
@@ -257,13 +267,13 @@ class Session:
             return classroom.fetch_meet_links(self.cls_page, self.course)
         finally:
             try:
-                self.meet_page.bring_to_front()
+                self.page.bring_to_front()
             except Exception:
                 pass
 
     def wait_for_link(self) -> tuple[str | None, bool]:
         """Ждёт новую ссылку в ленте. Возвращает (ссылка, это_запасной_вариант)."""
-        log.info("Ищу ссылку на Meet в ленте курса %s", self.course)
+        log.info("Ищу ссылку на звонок в ленте курса %s", self.course)
         fallback_at = self.occ.start + minutes(self.s.fallback_after_min)
         alerted = False
         while now() < self.occ.end:
@@ -273,7 +283,7 @@ class Session:
                 raise
             except Exception as ex:
                 log.warning("Не удалось открыть ленту курса: %s", ex)
-                time.sleep(self.s.link_poll_sec)
+                control.sleep(self.s.link_poll_sec)
                 continue
             if self.baseline is None:
                 # Бот впервые видит этот курс: всё, что есть сейчас, считаем старым.
@@ -290,10 +300,10 @@ class Session:
                                 f"имеющихся. Если появится новая — перейду на неё.\n{order[0]}")
                     return order[0], True
                 if not alerted:
-                    self.notify(f"⏳ «{self.name}»: в ленте курса пока нет ссылки на Meet, продолжаю проверять")
+                    self.notify(f"⏳ «{self.name}»: в ленте курса пока нет ссылки на звонок, продолжаю проверять")
                     alerted = True
-            time.sleep(self.s.link_poll_sec)
-        self.fail("за всю пару ссылка на Meet в ленте так и не появилась")
+            control.sleep(self.s.link_poll_sec)
+        self.fail("за всю пару ссылка на звонок в ленте так и не появилась")
         return None, False
 
     def find_new_link(self, current: str) -> str | None:
@@ -318,52 +328,55 @@ class Session:
 
     # --- звонок ---------------------------------------------------------------
 
-    def join(self, link: str, first: bool, fallback: bool) -> bool:
+    def join(self, link: str, first: bool) -> bool:
+        platform = platform_for(link)
         timeout = min(self.s.admit_wait_min * 60, max(60.0, (self.leave_at - now()).total_seconds()))
-        waiting = lambda: self.notify(f"⏳ «{self.name}»: попросил разрешения войти, жду, пока впустят")  # noqa: E731
+
+        def waiting():
+            self.r.status(f"«{self.name}»: жду, пока впустят")
+            self.notify(f"⏳ «{self.name}»: жду, пока преподаватель впустит (или начнёт встречу)")
+
         try:
-            meet.join(self.meet_page, link, timeout, on_waiting=waiting)
-        except meet.MeetError as ex:
-            self.fail(f"не получилось зайти: {ex}", self.meet_page)
+            platform.join(self.page, link, timeout, on_waiting=waiting,
+                          name=self.s.display_name, passcode=self.occ.entry.passcode or "")
+        except (CallError, NotAdmitted) as ex:
+            self.fail(f"не получилось зайти в {platform.NAME}: {ex}", self.page)
             return False
-        except meet.NotAdmitted as ex:
-            self.fail(f"не получилось зайти: {ex}", self.meet_page)
-            return False
-        start, end = f"{self.occ.start:%H:%M}", f"{self.occ.end:%H:%M}"
+        self.r.status(f"На паре «{self.name}» ({platform.NAME})")
         if first:
-            self.notify(f"✅ Зашёл на пару «{self.name}» ({start}–{end}), камера и микрофон выключены\n{link}")
+            self.notify(f"✅ Зашёл на пару «{self.name}» ({self.occ.start:%H:%M}–{self.occ.end:%H:%M}, "
+                        f"{platform.NAME}), камера и микрофон выключены\n{link}")
         else:
             self.notify(f"✅ «{self.name}»: снова в звонке")
         return True
 
     def stay(self, link: str, fallback: bool) -> tuple[str, str]:
-        page = self.meet_page
-        watcher = meet.MentionWatcher(self.r.cfg.telegram.mention_keywords)
+        platform = platform_for(link)
+        page = self.page
+        watcher = MentionWatcher(self.r.cfg.telegram.mention_keywords)
         missing = 0
         chat_clicks = 0
         next_check = 0.0
         next_link_check = time.monotonic() + 60
         while now() < self.leave_at:
-            if meet.in_call(page):
+            if platform.in_call(page):
                 missing = 0
             else:
                 missing += 1
                 if missing >= 3:
-                    text = meet.page_text(page)
-                    reason = " ".join(line.strip() for line in text.splitlines() if line.strip())[:200]
+                    reason, stop = platform.drop_reason(page)
                     screenshot(page, self.r.paths.logs, "dropped")
-                    kind = "dropped_stop" if meet.STOP_AFTER_DROP_RE.search(text) else "dropped_retry"
-                    return kind, reason
-                time.sleep(3)
+                    return ("dropped_stop" if stop else "dropped_retry"), reason
+                control.sleep(3)
                 continue
 
             if time.monotonic() >= next_check:
-                meet.prepare_in_call(page, self.s.watch_captions)
-                if watcher.keywords and chat_clicks < 3 and meet.open_chat(page) == "clicked":
+                platform.prepare_in_call(page, self.s.watch_captions)
+                if watcher.keywords and chat_clicks < 3 and platform.open_chat(page) == "clicked":
                     chat_clicks += 1
                 next_check = time.monotonic() + 30
 
-            for hit in watcher.poll(page):
+            for hit in watcher.check(*platform.chat_snapshot(page)):
                 self.notify(f"🔔 «{self.name}»: вас упомянули!\n{hit[:1500]}")
 
             if fallback and self.course and time.monotonic() >= next_link_check:
@@ -371,5 +384,5 @@ class Session:
                 new = self.find_new_link(link)
                 if new:
                     return "new_link", new
-            time.sleep(5)
+            control.sleep(5)
         return "time_up", ""

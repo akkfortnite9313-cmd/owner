@@ -1,0 +1,56 @@
+name: Тесты и сборка ClassBot.exe
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Зависимости
+        run: |
+          pip install -r requirements.txt pytest
+          python -m playwright install --with-deps chromium
+          sudo apt-get install -y xvfb
+      - name: Тесты
+        run: xvfb-run -a python -m pytest -q
+
+  windows-exe:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Зависимости
+        run: pip install -r requirements.txt pyinstaller pytest
+      - name: Тесты логики на Windows
+        run: python -m pytest -q tests/test_logic.py
+      - name: Сборка
+        run: pyinstaller --noconfirm ClassBot.spec
+      - name: Самопроверка exe (браузер, окно, тема)
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "selftest.txt"
+          $p = Start-Process -FilePath "dist\ClassBot.exe" -ArgumentList "selftest", "`"$out`"" -Wait -PassThru
+          Get-Content $out
+          if ($p.ExitCode -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClassBot-windows
+          path: dist/ClassBot.exe
+      - name: Релиз (для тегов v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ClassBot.exe

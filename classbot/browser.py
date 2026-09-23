@@ -73,9 +73,9 @@ def launch(pw, settings: Settings, profile_dir: Path, executable: str | None = N
     )
 
 
-def open_plain_browser(settings: Settings, profile_dir: Path, url: str) -> subprocess.Popen:
-    """Обычное окно браузера (без автоматизации) с профилем бота — для входа в Google."""
+def open_plain_browser(settings: Settings, profile_dir: Path, *urls: str) -> subprocess.Popen:
+    """Обычное окно браузера (без автоматизации) с профилем бота — для входа в аккаунты."""
     profile_dir.mkdir(parents=True, exist_ok=True)
     exe = find_browser(settings)
     return subprocess.Popen([exe, f"--user-data-dir={profile_dir}", "--no-first-run",
-                             "--no-default-browser-check", url])
+                             "--no-default-browser-check", *urls])

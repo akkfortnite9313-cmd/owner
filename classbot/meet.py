@@ -1,4 +1,4 @@
-"""Работа со страницей Google Meet: вход, контроль, что камера и микрофон выключены, чат, выход.
+"""Google Meet: вход, контроль, что камера и микрофон выключены, чат, выход.
 
 Селекторы собраны в начале файла. Если Google поменяет интерфейс Meet, чинить нужно здесь.
 Ссылки открываются с ?hl=en, поэтому основные надписи английские; русские варианты — запасные.
@@ -10,10 +10,14 @@ import re
 import time
 from urllib.parse import urlparse
 
-from .classroom import NotLoggedIn
+from . import control
+from .errors import CallError, NotAdmitted, NotLoggedIn
 from .links import with_lang
+from .web import click, click_first_visible, first_visible, page_text
 
 log = logging.getLogger(__name__)
+
+NAME = "Google Meet"
 
 JOIN_BUTTON_RE = re.compile(
     r"^\s*(join now|ask to join|join here too|switch here|присоединиться|попросить[^\n]*)\s*$", re.I)
@@ -51,44 +55,6 @@ STOP_AFTER_DROP_RE = re.compile(
     r"\b(removed|ended|only one|no one else)\b|удалил|заверш|никого|единственн", re.I)
 
 
-class MeetError(Exception):
-    """Зайти не получилось, и повторять бессмысленно."""
-
-
-class NotAdmitted(Exception):
-    """Не впустили за отведённое время."""
-
-
-def page_text(page) -> str:
-    try:
-        return page.evaluate("() => document.body ? document.body.innerText : ''") or ""
-    except Exception:
-        return ""
-
-
-def _first_visible(locator):
-    try:
-        for el in locator.all():
-            if el.is_visible():
-                return el
-    except Exception:
-        pass
-    return None
-
-
-def _click_first_visible(locator, what: str) -> bool:
-    el = _first_visible(locator)
-    if not el:
-        return False
-    try:
-        el.click(timeout=5000)
-        log.info("Нажал: %s", what)
-        return True
-    except Exception as ex:
-        log.debug("Не удалось нажать %s: %s", what, ex)
-        return False
-
-
 def in_call(page) -> bool:
     try:
         return page.locator(LEAVE_SEL).count() > 0
@@ -102,15 +68,15 @@ def ensure_muted(page) -> None:
         # Перезапрашиваем после каждого клика: одна и та же кнопка может встречаться дважды,
         # и второй клик включил бы обратно.
         for _ in range(3):
-            if not _click_first_visible(page.locator(sel), what):
+            if not click_first_visible(page.locator(sel), what):
                 break
             time.sleep(0.7)
 
 
 def dismiss_popups(page) -> None:
-    _click_first_visible(page.get_by_role("button", name=DISMISS_ANYWHERE_RE), "закрыть подсказку")
+    click_first_visible(page.get_by_role("button", name=DISMISS_ANYWHERE_RE), "закрыть подсказку")
     dialogs = page.locator('[role="dialog"], [role="alertdialog"]')
-    _click_first_visible(dialogs.get_by_role("button", name=DISMISS_IN_DIALOG_RE), "ответить на диалог")
+    click_first_visible(dialogs.get_by_role("button", name=DISMISS_IN_DIALOG_RE), "ответить на диалог")
 
 
 def _check_not_logged_in(page, text: str) -> None:
@@ -132,7 +98,7 @@ def _fatal_line(text: str) -> str | None:
     return None
 
 
-def join(page, url: str, timeout_s: float, on_waiting=None) -> None:
+def join(page, url: str, timeout_s: float, on_waiting=None, name: str = "", passcode: str = "") -> None:
     """Открывает встречу и заходит. Возвращается, когда бот уже в звонке."""
     target = with_lang(url)
     log.info("Открываю %s", target)
@@ -147,24 +113,22 @@ def join(page, url: str, timeout_s: float, on_waiting=None) -> None:
         _check_not_logged_in(page, text)
         fatal = _fatal_line(text)
         if fatal:
-            raise MeetError(fatal)
+            raise CallError(fatal)
         dismiss_popups(page)
-        button = _first_visible(page.get_by_role("button", name=JOIN_BUTTON_RE))
+        button = first_visible(page.get_by_role("button", name=JOIN_BUTTON_RE))
         # Повторно жмём, только если кнопка снова появилась (например, запрос на вход истёк).
         if button and (last_click is None or time.monotonic() - last_click > 30):
             ensure_muted(page)
             try:
                 label = (button.inner_text() or "").strip()
-                button.click(timeout=5000)
-            except Exception as ex:
-                log.debug("Кнопка входа не нажалась: %s", ex)
-            else:
+            except Exception:
+                label = ""
+            if click(button, f"«{label}»"):
                 last_click = time.monotonic()
-                log.info("Нажал «%s»", label)
                 if ASK_TO_JOIN_RE.search(label) and on_waiting:
                     on_waiting()
                     on_waiting = None
-        time.sleep(2)
+        control.sleep(2)
     raise NotAdmitted(f"не удалось зайти за {timeout_s / 60:.0f} мин")
 
 
@@ -173,7 +137,7 @@ def prepare_in_call(page, captions: bool) -> None:
     dismiss_popups(page)
     ensure_muted(page)
     if captions:
-        _click_first_visible(page.locator(CAPTIONS_OFF_SEL), "включить субтитры")
+        click_first_visible(page.locator(CAPTIONS_OFF_SEL), "включить субтитры")
 
 
 def open_chat(page) -> str:
@@ -181,14 +145,12 @@ def open_chat(page) -> str:
     try:
         if page.locator(CHAT_INPUT_SEL).count() > 0:
             return "open"
-        button = _first_visible(page.locator(CHAT_BUTTON_SEL))
+        button = first_visible(page.locator(CHAT_BUTTON_SEL))
         if not button:
             return "none"
         if button.get_attribute("aria-pressed") == "true":
             return "open"
-        button.click(timeout=5000)
-        log.info("Открыл чат звонка")
-        return "clicked"
+        return "clicked" if click(button, "открыть чат") else "none"
     except Exception as ex:
         log.debug("Не удалось открыть чат: %s", ex)
         return "none"
@@ -197,14 +159,10 @@ def open_chat(page) -> str:
 def leave(page) -> None:
     if not in_call(page):
         return
-    if _click_first_visible(page.locator(LEAVE_SEL), "покинуть звонок"):
+    if click_first_visible(page.locator(LEAVE_SEL), "покинуть звонок"):
         time.sleep(2)
-        _click_first_visible(page.get_by_role("button", name=JUST_LEAVE_RE), "просто выйти")
+        click_first_visible(page.get_by_role("button", name=JUST_LEAVE_RE), "просто выйти")
         time.sleep(1)
-
-
-def _norm(text: str) -> str:
-    return text.lower().replace("ё", "е")
 
 
 _CHAT_JS = """() => ({
@@ -214,68 +172,17 @@ _CHAT_JS = """() => ({
 })"""
 
 
-class MentionWatcher:
-    """Следит за чатом (и субтитрами, если включены) и находит упоминания ключевых слов.
+def chat_snapshot(page) -> tuple[list, str]:
+    """(сообщения чата с id, весь текст страницы) — для поиска упоминаний."""
+    try:
+        data = page.evaluate(_CHAT_JS)
+        return data["msgs"], data["text"]
+    except Exception:
+        return [], ""
 
-    Сообщения чата с data-message-id проверяются по одному. Дополнительно весь текст
-    страницы: упоминание засчитывается, если ключевых слов на странице стало больше
-    и появилась новая, ни разу не виденная строка с ними (так не срабатывает на ваше
-    собственное имя под плиткой видео).
-    Первые WARMUP_S секунд бот только запоминает, что есть на странице: интерфейс
-    звонка ещё прогружается, и ваше имя может появиться не сразу.
-    """
 
-    WARMUP_S = 20
-
-    def __init__(self, keywords: list[str]):
-        self.keywords = [_norm(k) for k in keywords if k.strip()]
-        self.seen_ids: set[str] = set()
-        self.seen_lines: set[str] = set()
-        self.prev_count = 0
-        self.primed = False
-        self.started = None
-
-    def _count(self, text: str) -> int:
-        text = _norm(text)
-        return sum(text.count(k) for k in self.keywords)
-
-    def poll(self, page) -> list[str]:
-        if not self.keywords:
-            return []
-        try:
-            data = page.evaluate(_CHAT_JS)
-        except Exception:
-            return []
-        if self.started is None:
-            self.started = time.monotonic()
-        warming_up = time.monotonic() - self.started < self.WARMUP_S
-        return self.feed(data["msgs"], data["text"], absorb=warming_up)
-
-    def feed(self, msgs: list, text: str, absorb: bool = False) -> list[str]:
-        lines = [line.strip() for line in text.splitlines()]
-        count = self._count(text)
-        if not self.primed or absorb:
-            self.seen_ids.update(mid for mid, _ in msgs)
-            self.seen_lines.update(lines)
-            self.prev_count = count
-            self.primed = True
-            return []
-
-        hits = []
-        for mid, body in msgs:
-            if mid in self.seen_ids:
-                continue
-            self.seen_ids.add(mid)
-            if self._count(body):
-                hits.append(body.strip())
-
-        new_lines = []
-        for i, line in enumerate(lines):
-            if line and line not in self.seen_lines:
-                self.seen_lines.add(line)
-                if self._count(line):
-                    new_lines.append(" / ".join(x for x in lines[max(0, i - 2):i + 1] if x))
-        if not hits and count > self.prev_count and new_lines:
-            hits.extend(new_lines)
-        self.prev_count = count
-        return hits
+def drop_reason(page) -> tuple[str, bool]:
+    """(текст на экране после вылета, нужно ли перестать перезаходить)."""
+    text = page_text(page)
+    reason = " ".join(line.strip() for line in text.splitlines() if line.strip())[:200]
+    return reason, bool(STOP_AFTER_DROP_RE.search(text))

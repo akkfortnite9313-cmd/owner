@@ -2,9 +2,11 @@ import datetime as dt
 
 import pytest
 
-from classbot.config import ConfigError, Settings, next_occurrence, parse_config, upcoming, week_parity
-from classbot.links import count_links, normalize_meet_link, pick_new, with_lang
-from classbot.meet import MentionWatcher
+from classbot.config import (ConfigError, Settings, config_to_dict, load_config, next_occurrence, parse_config,
+                             parse_date, save_config, upcoming, week_parity)
+from classbot.links import (count_links, links_from_text, normalize_link, normalize_meet_link, pick_new,
+                            platform_of, with_lang, zoom_app_url, zoom_web_url)
+from classbot.mentions import MentionWatcher
 
 
 def cfg(**overrides):
@@ -33,7 +35,8 @@ def test_parse_classes():
     ({"days": "пн", "start": "10:00", "end": "09:00", "course": "https://classroom.google.com/c/x"}, "позже"),
     ({"days": "понед", "start": "09:00", "end": "10:00", "course": "https://classroom.google.com/c/x"}, "день"),
     ({"days": "пн", "start": "9:75", "end": "10:00", "course": "https://classroom.google.com/c/x"}, "время"),
-    ({"days": "пн", "start": "09:00", "end": "10:00"}, "course"),
+    ({"days": "пн", "start": "09:00", "end": "10:00"}, "ссылку на курс"),
+    ({"days": "пн", "start": "09:00", "end": "10:00", "link": "https://example.com/x"}, "не понимаю ссылку"),
     ({"days": "пн", "start": "09:00", "end": "10:00", "course": "https://example.com"}, "classroom"),
     ({"days": "пн", "start": "09:00", "end": "10:00", "meet": "https://meet.google.com/x", "week": "odd"},
      "semester_start"),
@@ -170,3 +173,67 @@ def test_stop_after_drop_regex():
     assert STOP_AFTER_DROP_RE.search("The host ended the call for everyone")
     assert STOP_AFTER_DROP_RE.search("You've been removed from the meeting")
     assert not STOP_AFTER_DROP_RE.search("You lost your network connection. Recommended: check wifi. Rejoin")
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("https://us05web.zoom.us/j/81234567890?pwd=AbC.1", "https://zoom.us/j/81234567890?pwd=AbC.1"),
+    ("https://zoom.us/j/81234567890", "https://zoom.us/j/81234567890"),
+    ("https://university.zoom.us/w/81234567890?tk=x&pwd=p", "https://zoom.us/j/81234567890?pwd=p"),
+    ("https://app.zoom.us/wc/81234567890/join?pwd=p", "https://zoom.us/j/81234567890?pwd=p"),
+    ("https://zoom.us/my/Ivanova.Teacher", "https://zoom.us/my/ivanova.teacher"),
+    ("https://www.google.com/url?q=https://us02web.zoom.us/j/81234567890%3Fpwd%3Dxyz&sa=D",
+     "https://zoom.us/j/81234567890?pwd=xyz"),
+    ("https://zoom.us/signin", None),
+    ("https://zoom.us.evil.com/j/81234567890", None),
+])
+def test_normalize_zoom(url, expected):
+    assert normalize_link(url) == expected
+
+
+def test_zoom_urls_and_platform():
+    link = "https://zoom.us/j/81234567890?pwd=AbC"
+    assert platform_of(link) == "zoom" and platform_of("https://meet.google.com/abc-defg-hij") == "meet"
+    assert zoom_web_url(link) == "https://zoom.us/wc/join/81234567890?pwd=AbC"
+    assert zoom_app_url(link, "Иван Иванов") == \
+        "zoommtg://zoom.us/join?action=join&confno=81234567890&pwd=AbC&uname=%D0%98%D0%B2%D0%B0%D0%BD+%D0%98%D0%B2%D0%B0%D0%BD%D0%BE%D0%B2"
+    assert zoom_app_url("https://zoom.us/my/teacher") is None
+
+
+def test_links_from_text_finds_zoom_and_meet():
+    text = "Пара тут: https://us06web.zoom.us/j/81234567890?pwd=abc. И запасная meet.google.com/abc-defg-hij"
+    found = [normalize_link(u) for u in links_from_text(text)]
+    assert found == ["https://zoom.us/j/81234567890?pwd=abc", "https://meet.google.com/abc-defg-hij"]
+
+
+def test_parse_date_formats():
+    assert parse_date("01.09.2026", "x") == dt.date(2026, 9, 1)
+    assert parse_date("2026-09-01", "x") == dt.date(2026, 9, 1)
+    with pytest.raises(ConfigError):
+        parse_date("31.02.2026", "x")
+
+
+def test_config_save_roundtrip(tmp_path):
+    c = parse_config({
+        "telegram": {"bot_token": "1:A", "chat_id": "42", "mention_keywords": ["Иванов"]},
+        "settings": {"display_name": "Иван", "zoom_mode": "app", "semester_start": "01.09.2026",
+                     "join_before_min": 2},
+        "classes": [
+            {"name": "Матан", "days": ["пн", "чт"], "start": "10:30", "end": "12:00",
+             "course": "https://classroom.google.com/c/abc"},
+            {"name": "Физра", "days": "пт", "start": "09:00", "end": "10:30",
+             "link": "https://zoom.us/j/81234567890?pwd=x", "passcode": "123", "week": "чётная"},
+        ],
+    })
+    path = tmp_path / "config.yaml"
+    save_config(c, path)
+    again = load_config(path)
+    assert config_to_dict(again) == config_to_dict(c)
+    assert again.classes[1].week == "even" and again.settings.semester_start == dt.date(2026, 9, 1)
+    assert again.settings.zoom_mode == "app" and again.classes[0].start == dt.time(10, 30)
+
+
+def test_bad_settings_values():
+    with pytest.raises(ConfigError, match="zoom_mode"):
+        parse_config({"settings": {"zoom_mode": "desktop"}, "classes": []})
+    with pytest.raises(ConfigError, match="число"):
+        parse_config({"settings": {"join_before_min": "две"}, "classes": []})

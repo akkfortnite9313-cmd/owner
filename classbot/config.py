@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable
 
 import yaml
+
+from .links import normalize_link, platform_of
 
 
 class ConfigError(Exception):
@@ -38,9 +41,10 @@ class ClassEntry:
     days: frozenset[int]  # 0 = понедельник
     start: dt.time
     end: dt.time
-    course: str | None = None
-    meet: str | None = None
-    week: str | None = None  # "odd" / "even" / None
+    course: str | None = None   # ссылка на курс Classroom — ссылку на звонок брать из ленты
+    link: str | None = None     # или постоянная ссылка на Meet / Zoom
+    passcode: str | None = None  # код доступа Zoom, если его нет в ссылке
+    week: str | None = None     # "odd" / "even" / None
 
 
 @dataclass
@@ -57,6 +61,8 @@ class Settings:
     browser: str = "auto"
     browser_path: str | None = None
     semester_start: dt.date | None = None
+    display_name: str = ""       # имя для Zoom, если бот не вошёл в аккаунт Zoom
+    zoom_mode: str = "browser"   # browser — веб-версия Zoom, app — приложение Zoom
 
 
 @dataclass
@@ -138,10 +144,14 @@ def parse_date(value, where: str) -> dt.date | None:
         return None
     if isinstance(value, dt.date):
         return value
+    text = str(value).strip()
     try:
-        return dt.date.fromisoformat(str(value).strip())
+        m = re.fullmatch(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", text)
+        if m:
+            return dt.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        return dt.date.fromisoformat(text)
     except ValueError:
-        raise ConfigError(f"{where}: дата должна быть вида 2026-09-01, а не {value!r}") from None
+        raise ConfigError(f"{where}: дата должна быть вида 01.09.2026, а не {value!r}") from None
 
 
 def _parse_class(raw: dict, idx: int) -> ClassEntry:
@@ -154,16 +164,19 @@ def _parse_class(raw: dict, idx: int) -> ClassEntry:
     end = parse_time(raw.get("end"), where + ", end")
     if end <= start:
         raise ConfigError(f"{where}: конец ({end:%H:%M}) должен быть позже начала ({start:%H:%M})")
-    course = (raw.get("course") or "").strip() or None
-    meet = (raw.get("meet") or "").strip() or None
-    if not course and not meet:
-        raise ConfigError(f"{where}: укажите course (ссылку на курс в Classroom) или meet (постоянную ссылку)")
+    course = str(raw.get("course") or "").strip() or None
+    # Раньше постоянная ссылка называлась meet — читаем и так.
+    link = str(raw.get("link") or raw.get("meet") or "").strip() or None
+    if not course and not link:
+        raise ConfigError(f"{where}: укажите ссылку на курс в Classroom или постоянную ссылку на Meet/Zoom")
     if course and "classroom.google.com" not in course:
-        raise ConfigError(f"{where}: course должен быть ссылкой вида https://classroom.google.com/c/...")
-    if meet and "meet.google.com" not in meet:
-        raise ConfigError(f"{where}: meet должен быть ссылкой вида https://meet.google.com/abc-defg-hij")
-    return ClassEntry(name=name, days=days, start=start, end=end, course=course, meet=meet,
-                      week=parse_week(raw.get("week"), where))
+        raise ConfigError(f"{where}: ссылка на курс должна быть вида https://classroom.google.com/c/...")
+    if link and not normalize_link(link):
+        raise ConfigError(f"{where}: не понимаю ссылку {link!r} — нужна ссылка на Google Meet "
+                          "(https://meet.google.com/abc-defg-hij) или Zoom (https://zoom.us/j/123456789)")
+    passcode = str(raw.get("passcode") or "").strip() or None
+    return ClassEntry(name=name, days=days, start=start, end=end, course=course, link=link,
+                      passcode=passcode, week=parse_week(raw.get("week"), where))
 
 
 def parse_config(data: dict, path: Path | None = None) -> Config:
@@ -185,6 +198,11 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
             except (TypeError, ValueError):
                 raise ConfigError(f"settings.{key}: нужно число, а не {value!r}") from None
         setattr(settings, key, value)
+    settings.display_name = str(settings.display_name or "").strip()
+    if settings.zoom_mode not in ("browser", "app"):
+        raise ConfigError("settings.zoom_mode: browser (в браузере) или app (в приложении Zoom)")
+    if settings.browser not in ("auto", "chrome", "msedge"):
+        raise ConfigError("settings.browser: auto, chrome или msedge")
 
     raw_tg = data.get("telegram") or {}
     keywords = raw_tg.get("mention_keywords") or []
@@ -208,6 +226,10 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
         raise ConfigError("для чётных/нечётных недель укажите settings.semester_start (первый день семестра)")
 
     return Config(settings=settings, telegram=telegram, classes=classes, path=path)
+
+
+def parse_class(raw: dict) -> ClassEntry:
+    return _parse_class(raw, 0)
 
 
 def load_config(path: Path) -> Config:
@@ -254,3 +276,49 @@ def next_occurrence(classes: Iterable[ClassEntry], now: dt.datetime, settings: S
         if occ.key not in skip:
             return occ
     return None
+
+
+def default_config() -> Config:
+    return Config(settings=Settings(), telegram=TelegramSettings(), classes=[])
+
+
+def class_to_dict(c: ClassEntry) -> dict:
+    data = {"name": c.name, "days": [DAY_SHORT[d] for d in sorted(c.days)],
+            "start": f"{c.start:%H:%M}", "end": f"{c.end:%H:%M}"}
+    for key in ("course", "link", "passcode", "week"):
+        if getattr(c, key):
+            data[key] = getattr(c, key)
+    return data
+
+
+def _plain(value):
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    return value
+
+
+def config_to_dict(cfg: Config) -> dict:
+    return {
+        "telegram": {"bot_token": cfg.telegram.bot_token, "chat_id": cfg.telegram.chat_id,
+                     "mention_keywords": list(cfg.telegram.mention_keywords)},
+        "settings": {k: _plain(v) for k, v in asdict(cfg.settings).items()},
+        "classes": [class_to_dict(c) for c in cfg.classes],
+    }
+
+
+def save_config(cfg: Config, path: Path) -> None:
+    text = ("# Настройки бота для пар. Удобнее менять их в окне программы ClassBot.\n"
+            + yaml.safe_dump(config_to_dict(cfg), allow_unicode=True, sort_keys=False))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+    cfg.path = path
+
+
+def describe_source(c: ClassEntry) -> str:
+    if c.link:
+        return {"meet": "Meet", "zoom": "Zoom"}.get(platform_of(c.link), "") + " (постоянная ссылка)"
+    return "из ленты Classroom"

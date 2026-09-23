@@ -1,7 +1,8 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-echo === Установка бота для пар ===
+echo === Установка ClassBot из исходников ===
+echo (Проще скачать готовый ClassBot.exe - см. README.md)
 where py >nul 2>nul
 if %errorlevel%==0 (set "PY=py -3") else (set "PY=python")
 %PY% --version >nul 2>nul
@@ -20,12 +21,8 @@ echo Устанавливаю зависимости...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip >nul
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 goto fail
-if not exist config.yaml (
-  copy config.example.yaml config.yaml >nul
-  echo Создан config.yaml - откройте его Блокнотом и впишите расписание.
-)
 echo.
-echo Готово. Дальше: заполните config.yaml и запустите 2_login.bat
+echo Готово. Запускайте ClassBot.bat
 pause
 exit /b 0
 
